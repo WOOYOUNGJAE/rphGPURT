@@ -957,6 +957,8 @@ struct DeviceSettings
     uint32                      rayHistoryCounterMode;       // TraceRayCounterMode requested by the client for RDP
                                                              // ray history captures. Only TraceRayCounterTraversal
                                                              // overrides the default (TraceRayCounterRayHistoryLight).
+    bool                        skipAccelStructDump;         // Skip TLAS/BLAS serialization (RawAccelStruct chunks)
+                                                             // in RRA traces; only ray history chunks are written.
 #endif
 };
 

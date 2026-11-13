@@ -1299,6 +1299,16 @@ void Device::WriteCapturedBvh(
 
     Pal::Result result = Pal::Result::Success;
 
+#if SOGANG_EXPERIMENT
+    // Sogang: skip the whole TLAS/BLAS dump (no RawAccelStruct chunks). This only affects the CPU-side dump at
+    // OnTraceFinished; AS tracking during the trace is unchanged. The cleanup below (capture list / tracker reset)
+    // still runs so the next trace starts from a clean state.
+    if (m_info.deviceSettings.skipAccelStructDump)
+    {
+        tlasCount = 0;
+    }
+#endif
+
     if (tlasCount > 0)
     {
         result = GetAccelStructPostBuildSize(GpuRt::AccelStructPostBuildInfoType::Serialization,
