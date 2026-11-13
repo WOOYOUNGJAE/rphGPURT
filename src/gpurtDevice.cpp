@@ -526,7 +526,8 @@ Device::Device(
     m_debugMonitor(this),
 #endif
     m_rayHistoryTraceList(this),
-    m_pBackend(pBackend)
+    m_pBackend(pBackend),
+    m_blasStatsLog(this)
 {
 }
 
@@ -730,6 +731,14 @@ Pal::Result Device::Init()
         {
             m_clientCb.pfnFreeGpuMem(m_info, pGpuMemB);
         }
+    }
+#endif
+
+#if GPURT_BUILD_RTIP3_1
+    // Per-BLAS node statistics log. Started after the settings above are final, since it logs them.
+    if (m_info.deviceSettings.enableBlasStatsLog && (m_rtIpLevel == Pal::RayTracingIpLevel::RtIp3_1))
+    {
+        m_blasStatsLog.Init();
     }
 #endif
 

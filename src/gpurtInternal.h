@@ -31,6 +31,7 @@
 #include "shared/gpurtBuildConstants.h"
 #include "shared/rayTracingDefs.h"
 #include "gpurtDebugMonitor.h"
+#include "gpurtBlasStatsLog.h"
 
 #include "palInlineFuncs.h"
 #include "palHashLiteralString.h"
@@ -833,6 +834,9 @@ public:
     Pal::gpusize GetLutVa() const { return m_lutGpuVa; }
 #endif
 
+    // Per-BLAS statistics log, or nullptr when DeviceSettings::enableBlasStatsLog is off (or not RTIP 3.1)
+    BlasStatsLog* GetBlasStatsLog() { return m_blasStatsLog.IsActive() ? &m_blasStatsLog : nullptr; }
+
 #if GPURT_DEVELOPER
     // Driver generated RGP markers are only added in internal builds because they expose details about the
     // construction of acceleration structure.
@@ -893,6 +897,8 @@ private:
 #if GPURT_ENABLE_GPU_DEBUG
     GpuRt::DebugMonitor                      m_debugMonitor;
 #endif
+    GpuRt::BlasStatsLog                      m_blasStatsLog;        // Declared last: destroyed (thread joined)
+                                                                    // before the other members
 };
 }  // namespace Internal
 } // namespace GpuRt

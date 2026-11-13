@@ -357,6 +357,56 @@ void BvhBatcher::BuildRaytracingAccelerationStructureBatch(
         BuildPhase(stgbBuilders, &BvhBuilder::PostBuildDumpEvents);
 #endif
     }
+
+#if GPURT_BUILD_RTIP3_1
+    // The trivial and single thread group builders are passed to the TLAS batch as well; log them only here.
+    if constexpr (IsTlas == false)
+    {
+        if (m_pDevice->GetBlasStatsLog() != nullptr)
+        {
+            LogBlasStats({ builders, stgbBuilders, trivialBuilders });
+        }
+    }
+#endif
+}
+
+// =====================================================================================================================
+// Records the BLAS statistics log dispatches for every BLAS build (not update) of the batch: all CP clears, one
+// barrier that also waits for the builds, then one count dispatch per BLAS.
+void BvhBatcher::LogBlasStats(
+    std::initializer_list<Util::Span<BvhBuilder>> builderSpans)
+{
+    bool anyLogged = false;
+
+    for (Util::Span<BvhBuilder> span : builderSpans)
+    {
+        for (BvhBuilder& builder : span)
+        {
+            if (builder.ShouldLogBlasStats())
+            {
+                builder.BlasStatsPrepare();
+                anyLogged = true;
+            }
+        }
+    }
+
+    if (anyLogged)
+    {
+        RGP_PUSH_MARKER("BLAS Stats");
+        Barrier(BarrierFlagSyncDispatch | BarrierFlagSyncPostCpWrite);
+
+        for (Util::Span<BvhBuilder> span : builderSpans)
+        {
+            for (BvhBuilder& builder : span)
+            {
+                if (builder.ShouldLogBlasStats())
+                {
+                    builder.BlasStatsDispatch();
+                }
+            }
+        }
+        RGP_POP_MARKER();
+    }
 }
 
 // =====================================================================================================================

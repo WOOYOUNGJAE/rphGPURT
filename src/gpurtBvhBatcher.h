@@ -81,6 +81,9 @@ private:
 
     void Barrier(uint32 flags = BarrierFlagSyncDispatch);
 
+    // Records the BLAS statistics log dispatches (DeviceSettings::enableBlasStatsLog) for the BLAS builds of a batch
+    void LogBlasStats(std::initializer_list<Util::Span<BvhBuilder>> builderSpans);
+
     bool PhaseEnabled(BuildPhaseFlags phase);
 
     template <typename BatchBuilderFunc>

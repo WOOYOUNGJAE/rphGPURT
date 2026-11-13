@@ -180,6 +180,7 @@ bvhShaderConfigs = [
     ShaderConfig(path="EncodeHwBvh3_1.hlsl", entryPoint="EncodeHwBvh3_1"),
     ShaderConfig(path="ScratchBvh/CollapseScratchBvh.hlsl", entryPoint="CollapseScratchBvh"),
     ShaderConfig(path="ScratchBvh/EncodeScratchBvh.hlsl", entryPoint="EncodeScratchBvh"),
+    ShaderConfig(path="BlasStats3_1.hlsl", entryPoint="BlasStats3_1"),
 #endif
     ShaderConfig(path="DGF/EncodeDGF.hlsl", entryPoint="EncodeDGF", defines="USES_DGF_BUFFER=1"),
     ShaderConfig(path="../shadersClean/traversal/PrepareShadowSbtForReplay.hlsl", entryPoint="PrepareShadowSbtForReplay", outputName="PrepareShadowSbtForReplay"),

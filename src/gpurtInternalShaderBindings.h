@@ -59,6 +59,17 @@ namespace CopyBufferRaw
     constexpr uint32 NumEntries = (sizeof(Constants) / sizeof(uint32));
 }
 
+namespace BlasStats
+{
+    struct Constants
+    {
+        uint32 seq;       // Sequence number the last thread group writes to the done marker
+        uint32 numGroups; // Number of dispatched thread groups
+    };
+
+    constexpr uint32 NumEntries = (sizeof(Constants) / sizeof(uint32));
+}
+
 namespace EmitSize
 {
     struct Constants
@@ -286,6 +297,15 @@ constexpr NodeMapping CopyBufferRawMapping[] =
     { NodeType::Constant, CopyBufferRaw::NumEntries },
     { NodeType::Uav, 2 },
     { NodeType::Uav, 2 }
+};
+
+constexpr NodeMapping BlasStats3_1Mapping[] =
+{
+    { NodeType::Constant, BlasStats::NumEntries },
+    { NodeType::Uav, 2 },   // AccelStruct (BLAS header)
+    { NodeType::Uav, 2 },   // Accum
+    { NodeType::Uav, 2 },   // StatsEntry
+    { NodeType::Uav, 2 }    // DoneMarker
 };
 
 constexpr NodeMapping EmitCurrentSizeMapping[] =

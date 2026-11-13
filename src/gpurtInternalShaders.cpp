@@ -123,6 +123,7 @@ const PipelineBuildInfo InternalPipelineBuildInfo[size_t(InternalRayTracingCsTyp
     PIPELINE_BUILD_BVH_INFO(EncodeScratchBvh),
     PIPELINE_BUILD_BVH_INFO(Update3_1),
     PIPELINE_BUILD_BVH_INFO(RefitInstanceBounds),
+    PIPELINE_BUILD_INFO(BlasStats3_1),
 #endif
     PIPELINE_BUILD_INFO(EncodeDGF),
     PIPELINE_BUILD_INFO(PrepareShadowSbtForReplay),

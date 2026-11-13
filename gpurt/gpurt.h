@@ -369,6 +369,7 @@ enum class InternalRayTracingCsType : uint32
     EncodeScratchBvh,
     Update3_1,
     RefitInstanceBounds,
+    BlasStats3_1,
 #endif
     EncodeDGF,
     PrepareShadowSbtForReplay,
@@ -943,6 +944,10 @@ struct DeviceSettings
     uint32                      boxSplittingFlags;           // Box splitting / Child reuse flags
     uint32                      wideNodeMergingFlags;        // Wide node merging flags
 #endif
+    bool                        enableBlasStatsLog;          // Append one CSV line of node statistics per RTIP 3.1
+                                                             // BLAS build to blasStatsLogPath (count dispatch +
+                                                             // monitor thread, see gpurtBlasStatsLog.h)
+    char                        blasStatsLogPath[256];       // Output file of enableBlasStatsLog (appended to)
 #if GPURT_DEVELOPER
     RgpMarkerGranularityFlags   rgpMarkerGranularityFlags;
 #endif

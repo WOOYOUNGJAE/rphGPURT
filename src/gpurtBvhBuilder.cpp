@@ -40,6 +40,7 @@
 #include "gpurtBvhBuilderCommon.h"
 #include "shared/accelStruct.h"
 #include "shared/rayTracingDefs.h"
+#include "shared/gpurtBlasStats.h"
 
 #include <vector>
 
@@ -3183,6 +3184,13 @@ void BvhBuilder::BuildRaytracingAccelerationStructure()
         PostBuildDumpEvents();
     }
 
+    if (ShouldLogBlasStats())
+    {
+        BlasStatsPrepare();
+        Barrier(BarrierFlagSyncDispatch | BarrierFlagSyncPostCpWrite);
+        BlasStatsDispatch();
+    }
+
     if (m_deviceSettings.enableInsertBarriersInBuildAS == true)
     {
         // Intentionally insert Barrier() for debugging purpose
@@ -3190,6 +3198,76 @@ void BvhBuilder::BuildRaytracingAccelerationStructure()
     }
 
     RGP_POP_MARKER();
+}
+
+// =====================================================================================================================
+// True for RTIP 3.1 BLAS builds (not updates) while the BLAS statistics log is active
+bool BvhBuilder::ShouldLogBlasStats() const
+{
+    return (m_pDevice->GetBlasStatsLog() != nullptr) &&
+           (m_buildConfig.topLevelBuild == false) &&
+           (IsUpdate() == false) &&
+           (m_buildConfig.numPrimitives != 0);
+}
+
+// =====================================================================================================================
+// Takes a ring slot and records its CP writes: the entry gets seq, BLAS VA and flags, the slot's accumulator and done
+// marker are zeroed. Recording them (instead of clearing on the CPU) keeps re-submitted command buffers correct.
+void BvhBuilder::BlasStatsPrepare()
+{
+    m_blasStatsSlot = m_pDevice->GetBlasStatsLog()->AllocateSlot();
+
+    const gpusize blasVa = HeaderBufferBaseVa();
+
+    uint32 entry[BLAS_STATS_ENTRY_CP_DWORDS] = {};
+    entry[BLAS_STATS_ENTRY_SEQ]         = m_blasStatsSlot.seq;
+    entry[BLAS_STATS_ENTRY_BLAS_VA_LO]  = Util::LowPart(blasVa);
+    entry[BLAS_STATS_ENTRY_BLAS_VA_HI]  = Util::HighPart(blasVa);
+#if GPURT_BUILD_RTIP3_1
+    entry[BLAS_STATS_ENTRY_MERGE_FLAGS] =
+        m_buildConfig.enableWideNodeMerging ? m_deviceSettings.wideNodeMergingFlags : 0;
+    entry[BLAS_STATS_ENTRY_OBB_FLAGS]   = m_buildConfig.enableOrientedBoundingBoxes;
+#endif
+
+    // The shader writes the rest of the entry before the marker, so only the CP part and the accumulator are written.
+    WriteOrZeroDataImmediate(m_blasStatsSlot.entryVa, entry, BLAS_STATS_ENTRY_CP_DWORDS);
+    WriteOrZeroDataImmediate(m_blasStatsSlot.accumVa + (BLAS_STATS_ACCUM_FIRST_DWORD * sizeof(uint32)),
+                             nullptr,
+                             BLAS_STATS_ACCUM_DWORDS);
+    WriteImmediateSingle(m_blasStatsSlot.markerVa, 0, ImmediateDataWidth::ImmediateData32Bit);
+}
+
+// =====================================================================================================================
+// Records the count dispatch. Needs a barrier after BlasStatsPrepare() that waits for the build dispatches and the CP
+// writes (BarrierFlagSyncDispatch | BarrierFlagSyncPostCpWrite). The last thread group writes the done marker.
+void BvhBuilder::BlasStatsDispatch()
+{
+#if GPURT_BUILD_RTIP3_1
+    // Enough lanes for the largest possible BLAS; the shader reads the real node count from the header.
+    const uint32 numGroups = Util::Max(1u, Util::RoundUpQuotient(GetNumInternalNodeCount(),
+                                                                 uint32(BLAS_STATS_THREADGROUP_SIZE)));
+
+    m_pDevice->BindPipeline(m_cmdBuffer, InternalRayTracingCsType::BlasStats3_1, {}, 0);
+
+    const BlasStats::Constants shaderConstants =
+    {
+        .seq       = m_blasStatsSlot.seq,
+        .numGroups = numGroups,
+    };
+
+    uint32 entryOffset = 0;
+    entryOffset = WriteUserDataEntries(&shaderConstants, BlasStats::NumEntries, entryOffset);
+    // The AS header (and the node offsets in it) starts after the metadata: ResultBufferBaseVa(), like DstBuffer of the
+    // build shaders. HeaderBufferBaseVa() is the API address, which points at the metadata.
+    entryOffset = WriteBufferVa(ResultBufferBaseVa(), entryOffset);
+    entryOffset = WriteBufferVa(m_blasStatsSlot.accumVa, entryOffset);
+    entryOffset = WriteBufferVa(m_blasStatsSlot.entryVa, entryOffset);
+    entryOffset = WriteBufferVa(m_blasStatsSlot.markerVa, entryOffset);
+
+    RGP_PUSH_MARKER("BLAS Stats");
+    Dispatch(numGroups);
+    RGP_POP_MARKER();
+#endif
 }
 
 // =====================================================================================================================
