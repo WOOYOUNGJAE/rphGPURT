@@ -137,16 +137,17 @@ float ReadKDopMax(uint laneGroupIndex, uint planeIndex)
 //=====================================================================================================================
 // K-DOP slot index of block member m. The leader (m == 0) always uses the slot of its own node.
 //
-// MERGE_BOX_NODES_FLAG == 1: merged nodes keep their place in the dst BVH, so member m owns node (leader + m).
-// MERGE_BOX_NODES_FLAG == 2: merged nodes are compacted away and (leader + m) belongs to another node, so members
-//                            1..n-1 use slots allocated past the last dst box node, starting at memberSlotBase.
+// MERGE_BOX_NODES_FLAG == 1: followers keep their place in the dst BVH, so member m owns node (leader + m).
+// MERGE_BOX_NODES_FLAG == 2: followers are compacted away and (leader + m) belongs to another node, so the followers
+//                            (members 1..n-1) use slots allocated past the last dst box node, starting at
+//                            followerSlotBase.
 uint GetBlockMemberKdopIndex(
     uint leaderIndex,
-    uint memberSlotBase,
+    uint followerSlotBase,
     uint memberIndex)
 {
 #if (MERGE_BOX_NODES_FLAG == 2)
-    return (memberIndex == 0) ? leaderIndex : (memberSlotBase + memberIndex - 1u);
+    return (memberIndex == 0) ? leaderIndex : (followerSlotBase + memberIndex - 1u);
 #else
     return leaderIndex + memberIndex;
 #endif
@@ -531,13 +532,13 @@ void RefitOrientedBoundsImpl(
 
 #if (MERGE_BOX_NODES_FLAG == 1)
         // With merging enabled the dst BVH is not compacted, so box child k always owns node (base + k).
-        // The NodeRangeLength of a merged sibling is 0 on purpose, which makes the prefix sum collapse it onto its
-        // leader. Traversal wants that, but here every block member has to reach its own K-DOP slot.
+        // The left sibling of a follower has NodeRangeLength 0 on purpose, which makes the prefix sum collapse the
+        // follower onto its leader. Traversal wants that, but here every block member has to reach its own K-DOP slot.
         const uint packedOffset =
             (nodeMergingEnabled && (childIsLeaf == false)) ? laneGroup.laneIndex : prefixSumOffset;
 #else
-        // The dst BVH is compacted, so a merged sibling has no node of its own. The prefix sum resolves it to its
-        // leader, and its K-DOP slot is looked up separately below.
+        // The dst BVH is compacted, so a follower has no node of its own. The prefix sum resolves it to its leader,
+        // and its K-DOP slot is looked up separately below.
         const uint packedOffset = prefixSumOffset;
 #endif
 
@@ -549,24 +550,24 @@ void RefitOrientedBoundsImpl(
 
         uint childKdopIndex = childIndex;
 #if (MERGE_BOX_NODES_FLAG == 2)
-        // A box child is a merged block member when its left sibling has NodeRangeLength 0, since that sibling
-        // shares its node with it. Members follow their leader in consecutive lanes, so the distance to the
+        // A box child is a follower when its left sibling has NodeRangeLength 0, since that sibling shares its
+        // node with it. Followers come right after their leader in consecutive lanes, so the distance to the
         // leader lane is the member index. Without merging every box child has NodeRangeLength 1 and this is 0.
-        const bool isBoxChild    = isChildValid && (childIsLeaf == false);
-        const uint boxChildMask  = laneGroup.Ballot(isBoxChild);
-        const uint mergedBoxMask =
+        const bool isBoxChild      = isChildValid && (childIsLeaf == false);
+        const uint boxChildMask    = laneGroup.Ballot(isBoxChild);
+        const uint followerBoxMask =
             (laneGroup.Ballot(isBoxChild && (childInfo.NodeRangeLength() == 0)) << 1) & boxChildMask;
 
-        const uint leaderLane        = firstbithigh(~mergedBoxMask & bits(laneGroup.laneIndex + 1));
+        const uint leaderLane        = firstbithigh(~followerBoxMask & bits(laneGroup.laneIndex + 1));
         const uint memberIndexInLeaf = laneGroup.laneIndex - leaderLane;
 
         if (isBoxChild && (memberIndexInLeaf != 0))
         {
-            // The leader recorded where its members' K-DOPs went before it signalled this node.
-            const uint memberSlotBase = ScratchGlobal.Load(
-                ShaderConstants.offsets.qbvhKdops + (childIndex * sizeof(ObbKdop)) + OBBKDOP_MEMBER_SLOT_BASE_OFFSET);
+            // The leader recorded where its followers' K-DOPs went before it signalled this node.
+            const uint followerSlotBase = ScratchGlobal.Load(
+                ShaderConstants.offsets.qbvhKdops + (childIndex * sizeof(ObbKdop)) + OBBKDOP_FOLLOWER_SLOT_BASE_OFFSET);
 
-            childKdopIndex = GetBlockMemberKdopIndex(childIndex, memberSlotBase, memberIndexInLeaf);
+            childKdopIndex = GetBlockMemberKdopIndex(childIndex, followerSlotBase, memberIndexInLeaf);
         }
 #endif
 
@@ -592,22 +593,23 @@ void RefitOrientedBoundsImpl(
         // and keeps it in registers for the node wide reduction below.
         BoundingBox candidateObb = InvalidBoundingBox;
 
-        uint memberSlotBase = 0;
+        uint followerSlotBase = 0;
 #if (MERGE_BOX_NODES_FLAG == 2)
-        // Members after the leader have no node of their own in the compacted dst BVH, so their K-DOP slots are
-        // allocated past the last dst box node. Together with the leaders this never exceeds the number of wide
-        // nodes, which is what the K-DOP buffer is sized for without compaction.
+        // Followers have no node of their own in the compacted dst BVH, so their K-DOP slots are allocated past
+        // the last dst box node. Together with the leaders this never exceeds the number of wide nodes, which is
+        // what the K-DOP buffer is sized for without compaction.
         if (laneGroup.IsFirstLane() && isLeafOnlyBlockNode && (countbits(leafStartMask) > 1))
         {
-            uint memberSlotOffset = 0;
-            ScratchGlobal.InterlockedAdd(ShaderConstants.offsets.obbRefitStackPtrs + STACK_PTRS_OBB_REFIT_MEMBER_SLOT_COUNT,
-                                         countbits(leafStartMask) - 1u,
-                                         memberSlotOffset);
+            uint followerSlotOffset = 0;
+            ScratchGlobal.InterlockedAdd(
+                ShaderConstants.offsets.obbRefitStackPtrs + STACK_PTRS_OBB_REFIT_FOLLOWER_SLOT_COUNT,
+                countbits(leafStartMask) - 1u,
+                followerSlotOffset);
 
-            memberSlotBase =
-                ReadAccelStructHeaderField(ACCEL_STRUCT_HEADER_NUM_INTERNAL_FP32_NODES_OFFSET) + memberSlotOffset;
+            followerSlotBase =
+                ReadAccelStructHeaderField(ACCEL_STRUCT_HEADER_NUM_INTERNAL_FP32_NODES_OFFSET) + followerSlotOffset;
         }
-        memberSlotBase = laneGroup.ReadFirstLane(memberSlotBase);
+        followerSlotBase = laneGroup.ReadFirstLane(followerSlotBase);
 #endif
 
         uint remainingLeafStarts = isLeafOnlyBlockNode ? leafStartMask : 1u;
@@ -626,7 +628,7 @@ void RefitOrientedBoundsImpl(
 
             // The first member keeps the K-DOP that is already live, which is what a node without merging does:
             // freshly initialised on the first iteration, and holding a subset of this node's K-DOP when walking
-            // up the tree. Only the members after it need a clean one, since each of them owns a separate slot.
+            // up the tree. Only the followers need a clean one, since each of them owns a separate slot.
             // Blocks are leaf-only nodes, so they are only ever seen on the first iteration.
             if (blockMemberIndex > 0)
             {
@@ -667,7 +669,7 @@ void RefitOrientedBoundsImpl(
             if (laneGroup.IsFirstLane())
             {
                 const uint memberKdopOfs = ShaderConstants.offsets.qbvhKdops +
-                    (GetBlockMemberKdopIndex(curNodeIndex, memberSlotBase, blockMemberIndex) * sizeof(ObbKdop));
+                    (GetBlockMemberKdopIndex(curNodeIndex, followerSlotBase, blockMemberIndex) * sizeof(ObbKdop));
 
                 for (uint i = 0; i < KDOP_PLANE_COUNT; i++)
                 {
@@ -752,20 +754,20 @@ void RefitOrientedBoundsImpl(
         if (laneGroup.laneIndex < blockMemberIndex)
         {
             const uint memberKdopOfs = ShaderConstants.offsets.qbvhKdops +
-                (GetBlockMemberKdopIndex(curNodeIndex, memberSlotBase, laneGroup.laneIndex) * sizeof(ObbKdop));
+                (GetBlockMemberKdopIndex(curNodeIndex, followerSlotBase, laneGroup.laneIndex) * sizeof(ObbKdop));
 
             ScratchGlobal.Store(memberKdopOfs + (KDOP_PLANE_COUNT * sizeof(float2)), bestObbMatrixIndex);
         }
 
 #if (MERGE_BOX_NODES_FLAG == 2)
-        // Record where the members went in the leader slot, which the parent reaches through the prefix sum.
+        // Record where the followers went in the leader slot, which the parent reaches through the prefix sum.
         // Written for every node so that no stale value is left behind. It must land before the parent counter
         // is signalled below.
         if (laneGroup.IsFirstLane())
         {
             ScratchGlobal.Store(ShaderConstants.offsets.qbvhKdops + (curNodeIndex * sizeof(ObbKdop)) +
-                                    OBBKDOP_MEMBER_SLOT_BASE_OFFSET,
-                                memberSlotBase);
+                                    OBBKDOP_FOLLOWER_SLOT_BASE_OFFSET,
+                                followerSlotBase);
         }
 #endif
 

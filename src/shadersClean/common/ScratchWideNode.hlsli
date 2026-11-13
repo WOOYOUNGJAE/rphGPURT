@@ -17,12 +17,13 @@ struct ScratchWideNode
     uint   scratchIndex;
 
     float3 bbox_max;
-    // NOTE : "block" means the leader node containing the merged sibling's children.
+    // NOTE : "block" means the leader node that also holds the children of its followers.
+    //        member = a sibling in a block (leader or follower), follower = a member merged into the leader.
     uint   packedFlags; // unused [24:31]
-                        // offset in the block. [17:19] - for merged node
-                        //  If nodes are merged, the offset starts after the leaves merged from previous siblings.
+                        // offset in the block. [17:19] - for follower node
+                        //  For a follower, the offset starts after the leaves of the members before it.
                         //  If this is 0, the node is either the leader child or a zero-leaf box.
-                        // num siblings merged into this node [17:19] - for leader node (not used)
+                        // number of followers merged into this node [17:19] - for leader node (not used)
                         // leader mask of child nodes [9:16]
                         // whether this node is the leader box node [8] (not used)
                         // number of leaf children [4:7]

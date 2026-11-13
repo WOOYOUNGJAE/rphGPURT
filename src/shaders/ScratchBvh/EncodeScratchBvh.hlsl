@@ -25,7 +25,7 @@
 #ifndef _ENCODE_SCRATCH_BVH_HLSL
 #define _ENCODE_SCRATCH_BVH_HLSL
 #define USE_LDS_CHILDREN 1 // this is default setting
-#define MERGED_STACK_ENTRY 0xFFFFFFFE
+#define FOLLOWER_STACK_ENTRY 0xFFFFFFFE
 //=====================================================================================================================
 #include "../../shadersClean/common/ShaderDefs.hlsli"
 
@@ -260,21 +260,19 @@ static void EncodeCompressedBoxNode(
 
     uint boxOrLeafChildIndex = childIsBox ? laneGroup.laneIndex : laneGroup.laneIndex - numBoxChildren;
 
-    bool isMerged = MergeLeafOnlyBoxNodes(laneGroup,
-                                          laneGroupIndex,
-                                          scratchNodesScratchOffset,
-                                          scratchWideNodesScratchOffset,
-                                          childWideScratchIndex,
-                                          numPrimRefs,
-                                          childIsBox);
-    const bool isLeaderBoxChild = childIsBox && !isMerged;
-    const bool isMergedBoxChild = childIsBox && isMerged;
+    bool isFollower = MergeLeafOnlyBoxNodes(laneGroup,
+                                            laneGroupIndex,
+                                            scratchWideNodesScratchOffset,
+                                            childWideScratchIndex,
+                                            childIsBox);
+    const bool isLeaderBoxChild   = childIsBox && !isFollower;
+    const bool isFollowerBoxChild = childIsBox && isFollower;
 
-    const uint leaderBoxMask = laneGroup.Ballot(isLeaderBoxChild);
-    const uint mergedBoxMask = laneGroup.Ballot(isMergedBoxChild);
+    const uint leaderBoxMask   = laneGroup.Ballot(isLeaderBoxChild);
+    const uint followerBoxMask = laneGroup.Ballot(isFollowerBoxChild);
 
-    const uint numLeaderBoxChildren = countbits(leaderBoxMask);
-    const uint numMergedBoxChildren = countbits(mergedBoxMask);
+    const uint numLeaderBoxChildren   = countbits(leaderBoxMask);
+    const uint numFollowerBoxChildren = countbits(followerBoxMask);
 
     // Write leader box mask to parent node - not used
     // if (laneGroup.IsFirstLane())
@@ -330,10 +328,10 @@ static void EncodeCompressedBoxNode(
                             uint2(childWideScratchIndex, packedDstNodeIdx));
         }
 #if (MERGE_BOX_NODES_FLAG == 1)
-        else if (isMergedBoxChild)
+        else if (isFollowerBoxChild)
         {
             ScratchGlobal.Store2(ShaderConstants.offsets.qbvhGlobalStack + (childStackIdx * sizeof(uint2)),
-                            uint2(MERGED_STACK_ENTRY, INVALID_IDX));
+                            uint2(FOLLOWER_STACK_ENTRY, INVALID_IDX));
         }
 #endif
     }
@@ -400,11 +398,11 @@ static void EncodeCompressedBoxNode(
         const uint nodeRangeLength = childIsLeaf ? (EnableLeafCompressionPass() ? 0 : 1) :
                                                     // During the decode stage of traverse, nodeRangeLength indicates how many
                                                     // internal nodes away the next sibling is from this boxNode. If the right
-                                                    // sibling has been merged and invalidated, increment it by 0 so that it
-                                                    // points to the same node as the left sibling.
+                                                    // sibling is a follower, increment it by 0 so that it points to the
+                                                    // same node as the left sibling.
                                                     ((leaderBoxMask & (1u << (laneGroup.laneIndex + 1))) == 0) ? 0 :
 #if (MERGE_BOX_NODES_FLAG == 1)
-                                                    // (Number of consecutive merged (0) bits ending at laneIndex) + 1.
+                                                    // (Number of consecutive follower (0) bits ending at laneIndex) + 1.
                                                     (laneGroup.laneIndex + 1 - firstbithigh(leaderBoxMask & bits(laneGroup.laneIndex + 1)));
 #elif (MERGE_BOX_NODES_FLAG == 2)
                                                     1; // leader nodes are consecutive
@@ -496,15 +494,15 @@ static void EncodeCompressedBoxNode(
             {
                 // Push children based on their original counts before merging, rather than as a single merged entry.
 
-                // merged children in merged nodes
-                const uint numMergedMembers = bitFieldExtract(parentWideNodePackedFlags, 17, 3);
+                // followers merged into this (leader) node
+                const uint numFollowers = bitFieldExtract(parentWideNodePackedFlags, 17, 3);
 
                 // original children in leader node
                 uint obbRefitStackIndex = 0;
                 ScratchGlobal.InterlockedAdd(
                     ShaderConstants.offsets.obbRefitStackPtrs + STACK_PTRS_OBB_REFIT_BATCH_COUNT, 1, obbRefitStackIndex);
 
-                bool isBlockNode = numMergedMembers != 0;
+                bool isBlockNode = numFollowers != 0;
 
                 // The stack entry is a plain node index. How a block is partitioned is described by the leaf start
                 // mask in the OBB flags below, so nothing has to be packed in here.
@@ -516,12 +514,12 @@ static void EncodeCompressedBoxNode(
                     // The leader always owns the first segment, so bit 0 is always set.
                     leafStartMask = 1u;
 
-                    for (uint i = 1; i <= numMergedMembers; ++i)
+                    for (uint i = 1; i <= numFollowers; ++i)
                     {
-                        const uint memberPackedFlags =
+                        const uint followerPackedFlags =
                             FetchScratchWideNodeData<uint>(scratchWideNodesScratchOffset, parentWideScratchNodeIndex + i, SCRATCH_WIDE_NODE_FLAGS_OFFSET);
 
-                        const uint segmentBegin = bitFieldExtract(memberPackedFlags, 17, 3);
+                        const uint segmentBegin = bitFieldExtract(followerPackedFlags, 17, 3);
                         GPU_ASSERT((segmentBegin > 0) && (segmentBegin < 8));
                         GPU_ASSERT((leafStartMask & (1u << segmentBegin)) == 0);
 
@@ -553,7 +551,7 @@ static void EncodeCompressedBoxNode(
 
     if (laneGroup.IsFirstLane())
     {
-        ScratchGlobal.InterlockedAdd(ShaderConstants.offsets.wideNodeEncodingDoneCounter, 1 + numMergedBoxChildren);
+        ScratchGlobal.InterlockedAdd(ShaderConstants.offsets.wideNodeEncodingDoneCounter, 1 + numFollowerBoxChildren);
     }
     uint localPrimCount = 0;
     if (childScratchNodeIndex != INVALID_IDX)
@@ -693,7 +691,7 @@ void EncodeScratchBvhImpl(
 
         stackEntry = laneGroup.ReadFirstLane(stackEntry);
 #if (MERGE_BOX_NODES_FLAG == 1)
-        if (stackEntry.x == MERGED_STACK_ENTRY)
+        if (stackEntry.x == FOLLOWER_STACK_ENTRY)
         {
             isGlobalStackEntryDone = true;
         } else
@@ -830,5 +828,5 @@ void EncodeScratchBvh(
 #endif
 
 #undef USE_LDS_CHILDREN
-#undef MERGED_STACK_ENTRY
+#undef FOLLOWER_STACK_ENTRY
 #endif

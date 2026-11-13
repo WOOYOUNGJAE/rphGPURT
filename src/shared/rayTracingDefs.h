@@ -121,12 +121,12 @@ struct ObbKdop
 {
     float2 minMax[13];
     uint obbMatrixIndex;
-    uint memberSlotBase;    // MERGE_BOX_NODES_FLAG == 2: first K-DOP slot of the block members after the leader
+    uint followerSlotBase;  // MERGE_BOX_NODES_FLAG == 2: first K-DOP slot of the block's followers
     uint __padding[4];
 };
 
 #define OBBKDOP_OBBMATRIX_INDEX_OFFSET 104
-#define OBBKDOP_MEMBER_SLOT_BASE_OFFSET 108
+#define OBBKDOP_FOLLOWER_SLOT_BASE_OFFSET 108
 #define OBBKDOP_SIZE 128
 
 #define OBB_FLAGS_BIT_OFFSET_NUM_BOX_CHILDREN 0u
@@ -211,14 +211,14 @@ struct ObbRefitStackPtrs
     uint groupCountY;   // Set to 1 (used as indirect dispatch Y dimension)
     uint groupCountZ;   // Set to 1 (used as indirect dispatch Z dimension)
     uint batchCount;    // Number of fat leaf nodes (internal nodes with all leaf children)
-    uint memberSlotCount; // Number of K-DOP slots allocated for block members (MERGE_BOX_NODES_FLAG == 2)
+    uint followerSlotCount; // Number of K-DOP slots allocated for block followers (MERGE_BOX_NODES_FLAG == 2)
 };
 
 #define STACK_PTRS_OBB_REFIT_GROUP_COUNT_X 0
 #define STACK_PTRS_OBB_REFIT_GROUP_COUNT_Y 4
 #define STACK_PTRS_OBB_REFIT_GROUP_COUNT_Z 8
 #define STACK_PTRS_OBB_REFIT_BATCH_COUNT   12
-#define STACK_PTRS_OBB_REFIT_MEMBER_SLOT_COUNT 16
+#define STACK_PTRS_OBB_REFIT_FOLLOWER_SLOT_COUNT 16
 
 #define REFIT_ORIENTED_BOUNDS3_1_THREADGROUP_SIZE 32
 
