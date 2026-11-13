@@ -125,6 +125,7 @@ set(gpurtHlsl
     OrientedBoundingBoxes.hlsl
     RefitOrientedBounds3_1.hlsl
     RefitOrientedBoundsTopLevel3_1.hlsl
+    BlasStats3_1.hlsl
 #endif
     RayQuery.hlsl
     RayQuery1_1.hlsl
@@ -208,6 +209,7 @@ set(otherDeps
     ../shadersClean/common/gfx12/internalNode.hlsli
     ../shadersClean/common/gfx12/primitiveNode.hlsli
     ../shared/gpurtShaderConstants.h
+    ../shared/gpurtBlasStats.h
 #endif
     ../shadersClean/common/Bits.hlsli
     ../shadersClean/common/Math.hlsli

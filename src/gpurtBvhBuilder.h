@@ -89,6 +89,13 @@ public:
     // Handles post-build dump event invocation
     void PostBuildDumpEvents();
 
+    // BLAS statistics log (DeviceSettings::enableBlasStatsLog, gpurtBlasStatsLog.h). For each RTIP 3.1 BLAS build:
+    // BlasStatsPrepare() takes a ring slot and records the CP clear of it, then after a barrier that also waits for
+    // the build, BlasStatsDispatch() records the count dispatch.
+    bool ShouldLogBlasStats() const;
+    void BlasStatsPrepare();
+    void BlasStatsDispatch();
+
     void InitializeBuildConfigs();
 
     void EncodePrimitives();
@@ -606,6 +613,7 @@ private:
     ResultBufferInfo                  m_resultBufferInfo;
     ScratchBufferInfo                 m_scratchBufferInfo;
     AccelStructInfo                   m_dumpInfo;
+    BlasStatsSlot                     m_blasStatsSlot{};     // Ring slot taken by BlasStatsPrepare()
 };
 
 };
