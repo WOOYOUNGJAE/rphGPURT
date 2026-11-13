@@ -302,6 +302,7 @@ static void CompressLeafChildren(
     const bool compressMultiple =
         (Settings.primCompressionFlags & PrimCompFlags::MultiPrim) && (isRebraidRootNode == false);
     const bool enableTrailingZeroCompression = Settings.primCompressionFlags & PrimCompFlags::EnableTrailingZeroAndPrefix;
+    const bool useFixedLayout = Settings.primCompressionFlags & PrimCompFlags::FixedLayout;
 
     // TODO: Allow more pairs. Update can only handle one:
     // - Parent pointer logic cannot handle multiple prims per slot in various places
@@ -583,6 +584,7 @@ static void CompressLeafChildren(
                                             triPairDescCount,
                                             false,
                                             enableTrailingZeroCompression,
+                                            useFixedLayout,
                                             triStructHeader);
 
         if (triPairDescCount > maxPairs)
@@ -636,6 +638,7 @@ static void CompressLeafChildren(
                                            triPairDescCountBackup,
                                            false,
                                            enableTrailingZeroCompression,
+                                           useFixedLayout,
                                            triStructHeader);
 
             GPU_ASSERT(valid);
@@ -681,6 +684,7 @@ static void CompressLeafChildren(
                                             triPairDescCount,
                                             false,
                                             enableTrailingZeroCompression,
+                                            useFixedLayout,
                                             triStructHeader);
 
         GPU_ASSERT(valid);

@@ -42,10 +42,19 @@ typedef uint64_t uint64;
 #endif
 
 #if GPURT_BUILD_RTIP3_1
+// Values of DeviceSettings::primCompressionFlags
+namespace PrimCompMode
+{
+    static const uint32 Off            = 0; // No compression across triangle pairs
+    static const uint32 VariableLayout = 1; // Primitive structure field sizes are computed per structure
+    static const uint32 FixedLayout    = 2; // Primitive structure field sizes are the FIXED_* constants
+} // namespace PrimCompMode
+
+// Build shader flags derived from PrimCompMode
 namespace PrimCompFlags
 {
     static const uint32 MultiPrim                   = 1;
-    static const uint32 Reserved                    = 2;
+    static const uint32 FixedLayout                 = 2;
     static const uint32 EnableTrailingZeroAndPrefix = 4;
     static const uint32 reserved1                   = 8;
 };

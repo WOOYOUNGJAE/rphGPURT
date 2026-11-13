@@ -449,17 +449,47 @@ static void WriteTwoTriPrimStruct(
     // Triangle Pair Descriptor0 - 29  bits
     //------------------- 1024 bits
 
+    // Variable layout, used when PrimCompFlags::FixedLayout is not set:
+    //
+    // Header ----------- 52 bits
+    // Vertex Data ------ 576 bits (96 * 3 * 2)
+    // ----- Unused ----- 12 bits
+    // Parent pointer 0 - 32 bits
+    // Parent pointer 1 - 32 bits
+    // ----- Unused ----- 79 bits
+    // geometryId1Payload 30 bits
+    // Unused geo ID ---- 30 bits
+    // geometryIdAnchor-- 30 bits
+    //------------------- indexSectionMidpoint
+    // primIdAnchor ----- 31 bits
+    // Unused prim ID --- 31 bits
+    // primId1Payload --- 31 bits
+    // triDesc 0 -------- 29 bits
+    // triDesc 1 -------- 29 bits
+    //------------------- 1024 bits
+
+    const bool useFixedLayout = Settings.primCompressionFlags & PrimCompFlags::FixedLayout;
+
     // Note the second primitive ID of the second pair overlaps a pair descriptor.
     // This primitive is never valid, so it's not an issue.
-    const uint indexSectionMidpoint = FIXED_INDEX_SECTION_MIDPOINT;
+    const uint indexSectionMidpoint =
+        useFixedLayout ? FIXED_INDEX_SECTION_MIDPOINT : (1024 - (2 * TRI_PAIR_DESC_SIZE) - (3 * 31));
 
     uint d[PRIMITIVE_STRUCT_SIZE_IN_DW];
 
     const uint pairCount = (batchNodeIdx[1] != INVALID_IDX) ? 2 : 1;
 
     // Metadata header
-    d[0] = PackFixedMetadataHeaderBitsLo(pairCount);
-    d[1] = PackFixedMetadataHeaderBitsHi();
+    if (useFixedLayout)
+    {
+        d[0] = PackFixedMetadataHeaderBitsLo(pairCount);
+        d[1] = PackFixedMetadataHeaderBitsHi();
+    }
+    else
+    {
+        d[0] = PackMetadataHeaderBitsLo(31, 31, 31, 0, 15, 15, pairCount - 1, false);
+        d[1] = PackMetadataHeaderBitsHi(31, 31, indexSectionMidpoint);
+    }
 
     uint triDesc0 = 0;
     uint triDesc1 = 0;
@@ -545,7 +575,7 @@ static void WriteTwoTriPrimStruct(
     d[9]  = bitFieldInsert(d[9], 20, 12, asuint(tri0.v2.z));
     d[10] = bitFieldInsert(0,     0, 20, asuint(tri0.v2.z) >> 12);
 
-    if (any(tri0.v0 != 0.xxx) || any(tri0.v1 != 0.xxx) || any(tri0.v2 != 0.xxx))
+    if ((useFixedLayout == false) || any(tri0.v0 != 0.xxx) || any(tri0.v1 != 0.xxx) || any(tri0.v2 != 0.xxx))
     {
         triDesc0 |= 1 << TRI_DESC_PRIM_RANGE_STOP_BIT_SHIFT;
         PackedTriDescSetTriangle(0, 0, 1, 2, tri0Opaque, triDesc0);
@@ -575,24 +605,41 @@ static void WriteTwoTriPrimStruct(
         d[18] = bitFieldInsert(d[18], 20, 12, asuint(tri1.v2.z));
         d[19] = bitFieldInsert(0,      0, 20, asuint(tri1.v2.z) >> 12);
 
-        if (any(tri1.v0 != 0.xxx) || any(tri1.v1 != 0.xxx) || any(tri1.v2 != 0.xxx))
+        if ((useFixedLayout == false) || any(tri1.v0 != 0.xxx) || any(tri1.v1 != 0.xxx) || any(tri1.v2 != 0.xxx))
         {
             triDesc1 |= 1 << TRI_DESC_PRIM_RANGE_STOP_BIT_SHIFT;
             PackedTriDescSetTriangle(0, 3, 4, 5, tri1Opaque, triDesc1);
         }
 
-        // Geometry ID 1
-        d[24] = 0;
-        d[24] = bitFieldInsert(d[24], 4, 12, geomId1);
+        if (useFixedLayout)
+        {
+            // Geometry ID 1
+            d[24] = 0;
+            d[24] = bitFieldInsert(d[24], 4, 12, geomId1);
 
-        // Primitive ID 1
-        d[26] = 0;
-        d[26] = bitFieldInsert(d[26], 5, 18, primId1);
+            // Primitive ID 1
+            d[26] = 0;
+            d[26] = bitFieldInsert(d[26], 5, 18, primId1);
 
-        // Triangle descriptor 1
-        d[30] = 0;
-        d[30] = bitFieldInsert(d[30], 6, 26, triDesc1);
-        d[31] = bitFieldInsert(0, 0, 3, triDesc1 >> 26);
+            // Triangle descriptor 1
+            d[30] = 0;
+            d[30] = bitFieldInsert(d[30], 6, 26, triDesc1);
+            d[31] = bitFieldInsert(0, 0, 3, triDesc1 >> 26);
+        }
+        else
+        {
+            // Geometry ID 1
+            d[24] = bitFieldInsert(0, 15, 17, geomId1);
+            d[25] = bitFieldInsert(0, 0,  13, geomId1 >> 17);
+
+            // Primitive ID 1
+            d[29] = bitFieldInsert(0, 7, 25, primId1);
+            d[30] = bitFieldInsert(0, 0,  6, primId1 >> 25);
+
+            // Triangle descriptor 1
+            d[30] = bitFieldInsert(d[30], 6, 26, triDesc1);
+            d[31] = bitFieldInsert(d[30], 0, 3, triDesc1 >> 26);
+        }
     }
     else
     {
@@ -607,8 +654,10 @@ static void WriteTwoTriPrimStruct(
         d[19] = 0;
 
         d[24] = 0;
+        d[25] = 0;
         d[26] = 0;
 
+        d[29] = 0;
         d[30] = 0;
         d[31] = 0;
     }
@@ -618,19 +667,34 @@ static void WriteTwoTriPrimStruct(
     d[22] = 0;
     d[23] = 0;
 
-    d[27] = 0;
-    d[28] = 0;
-    d[29] = 0;
+    if (useFixedLayout)
+    {
+        d[27] = 0;
+        d[28] = 0;
+        d[29] = 0;
 
-    // Geometry ID 0
-    d[24] = bitFieldInsert(d[24], 16, 16, geomId0);
-    d[25] = bitFieldInsert(0, 0, 8, geomId0 >> 16);
+        // Geometry ID 0
+        d[24] = bitFieldInsert(d[24], 16, 16, geomId0);
+        d[25] = bitFieldInsert(0, 0, 8, geomId0 >> 16);
 
-    // Index section midpoint
+        // Index section midpoint
 
-    // Primitive ID 0
-    d[25] = bitFieldInsert(d[25], 8, 24, primId0);
-    d[26] = bitFieldInsert(d[26], 0, 5, primId0 >> 24);
+        // Primitive ID 0
+        d[25] = bitFieldInsert(d[25], 8, 24, primId0);
+        d[26] = bitFieldInsert(d[26], 0, 5, primId0 >> 24);
+    }
+    else
+    {
+        // Geometry ID 0
+        d[26] = bitFieldInsert(0, 11, 21, geomId0);
+        d[27] = bitFieldInsert(0, 0,  9, geomId0 >> 21);
+
+        // Index section midpoint
+
+        // Primitive ID 0
+        d[27] = bitFieldInsert(d[27], 9, 23, primId0);
+        d[28] = bitFieldInsert(0,     0,  8, primId0 >> 23);
+    }
 
     // Triangle descriptor 0
     d[31] = bitFieldInsert(d[31], 3, 29, triDesc0);

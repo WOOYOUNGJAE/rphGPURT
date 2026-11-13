@@ -252,6 +252,29 @@ static bool ForceDisableFp16BoxNodes(
     return forceFp16BoxOff;
 }
 
+#if GPURT_BUILD_RTIP3_1
+// =====================================================================================================================
+// Helper function that converts the primitive compression mode from the device settings to build shader flags.
+// Any value other than Off and VariableLayout selects the fixed layout, which includes the old all-bits-set default.
+static uint32 GetPrimCompressionFlags(
+    uint32 primCompressionMode)
+{
+    uint32 primCompressionFlags = 0;
+
+    if (primCompressionMode != PrimCompMode::Off)
+    {
+        primCompressionFlags = PrimCompFlags::MultiPrim | PrimCompFlags::EnableTrailingZeroAndPrefix;
+
+        if (primCompressionMode != PrimCompMode::VariableLayout)
+        {
+            primCompressionFlags |= PrimCompFlags::FixedLayout;
+        }
+    }
+
+    return primCompressionFlags;
+}
+#endif
+
 // =====================================================================================================================
 // Helper function that check if pair compression should be enabled
 // Returns True if triangle compression should be enabled based on the current build flags and settings.
@@ -1921,7 +1944,7 @@ void BvhBuilder::InitBuildConfig(
     {
         uint numPrimsPerLeaf;
 
-        m_buildConfig.primCompressionFlags = m_deviceSettings.primCompressionFlags;
+        m_buildConfig.primCompressionFlags = GetPrimCompressionFlags(m_deviceSettings.primCompressionFlags);
         {
             numPrimsPerLeaf = 2u;
         }
@@ -1951,6 +1974,13 @@ void BvhBuilder::InitBuildConfig(
                 ((m_buildConfig.maxPrimRangeSize > numPrimsPerLeaf) ||
                     (m_buildConfig.primCompressionFlags & PrimCompFlags::MultiPrim));
         }
+    }
+    else if ((buildArgs.inputs.type == AccelStructType::BottomLevel) &&
+             (m_pDevice->GetRtIpLevel() >= Pal::RayTracingIpLevel::RtIp3_1))
+    {
+        // Procedural primitive structures are not compressed, but they use the same layout as triangles
+        m_buildConfig.primCompressionFlags =
+            GetPrimCompressionFlags(m_deviceSettings.primCompressionFlags) & PrimCompFlags::FixedLayout;
     }
 
     m_buildConfig.enableOrientedBoundingBoxes = m_deviceSettings.enableOrientedBoundingBoxes;
