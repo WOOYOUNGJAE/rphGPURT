@@ -2427,10 +2427,14 @@ void BvhBuilder::RefitInstanceBounds()
 
     WriteBuildBufferBindings({}, BuildBufferBindingFlags::ObbLut);
 
+    INTERNAL_TIMESTAMP_BEGIN();
+
     RGP_PUSH_MARKER("Refit Instance Bounds (NumDescs=%u)", m_buildConfig.numPrimitives);
     Dispatch(DispatchSize(m_buildConfig.numPrimitives));
 
     RGP_POP_MARKER();
+
+    INTERNAL_TIMESTAMP_END();
 }
 #endif
 
@@ -3060,6 +3064,48 @@ void BvhBuilder::GetAccelerationStructurePrebuildInfo(
     pPrebuildInfo->updateScratchDataSizeInBytes = updateDataSize;
     pPrebuildInfo->resultDataMaxSizeInBytes     = resultDataSize;
     pPrebuildInfo->maxPrimitiveCount            = m_buildConfig.maxNumPrimitives;
+}
+
+// =====================================================================================================================
+// Extends GetAccelerationStructurePrebuildInfo by also filling AccelStructEnabledPhases.
+// Calls GetAccelerationStructurePrebuildInfo internally and gathers per-phase execution info.
+void BvhBuilder::GetAccelerationStructurePrebuildInfos(
+    const AccelStructBuildInputs&           buildInfo,
+    AccelStructPrebuildInfo*                pPrebuildInfos,
+    AccelStructEnabledPhasesInfo*           pEnabledPhasesInfo)
+{
+    GetAccelerationStructurePrebuildInfo(buildInfo, pPrebuildInfos);
+
+    // EnabledPhases() describes the regular build path of BuildRaytracingAccelerationStructure() only.
+    uint64 flags = (m_buildConfig.maxNumPrimitives > 0) ? static_cast<uint64>(EnabledPhases()) : 0;
+
+#if GPURT_BUILD_RTIP3_1
+    if (m_buildConfig.shouldUseTrivialBuilder)
+    {
+        // BvhBatcher::BuildTrivialBvhs() writes no internal timestamps
+        flags = 0;
+    }
+    else if (UseSingleThreadGroupBuild())
+    {
+        flags = static_cast<uint64>(DetailedBuildPhaseFlags::BuildSingleThreadGroup);
+
+        if (Util::BitfieldIsSet(m_buildConfig.enableOrientedBoundingBoxes, uint32(AccelStructType::TopLevel)))
+        {
+            flags |= static_cast<uint64>(DetailedBuildPhaseFlags::RefitOrientedBounds);
+        }
+    }
+#endif
+
+    pEnabledPhasesInfo->enabledInternalPhases = flags;
+
+    // Decide Early Pair Compression
+    if (m_buildConfig.maxNumPrimitives > 0)
+    {
+        if (m_buildConfig.enableEarlyPairCompression)
+        {
+            pEnabledPhasesInfo->enabledPhaseMetaData.earlyEncodePrimitivesEnabled = 1;
+        }
+    }
 }
 
 // =====================================================================================================================
@@ -4402,10 +4448,14 @@ void BvhBuilder::BuildPLOC(
 
     WriteBuildBufferBindings(shaderConstants);
 
+    INTERNAL_TIMESTAMP_BEGIN();
+
     RGP_PUSH_MARKER("Build PLOC BVH (maxNumPrimitives %u)", m_buildConfig.maxNumPrimitives);
     Dispatch(numThreadGroups);
 
     RGP_POP_MARKER();
+
+    INTERNAL_TIMESTAMP_END();
 }
 
 // =====================================================================================================================
@@ -5684,9 +5734,13 @@ void BvhBuilder::BuildSingleThreadGroup()
     const uint32 vbvSrdTableGpuVaLo = Util::LowPart(m_geomBufferSrdTable);
     entryOffset = WriteUserDataEntries(&vbvSrdTableGpuVaLo, 1, entryOffset);
 
+    INTERNAL_TIMESTAMP_BEGIN();
+
     RGP_PUSH_MARKER("BVH build (STGB) (NumPrimitives=%u)", m_buildConfig.maxNumPrimitives);
     Dispatch(1);
     RGP_POP_MARKER();
+
+    INTERNAL_TIMESTAMP_END();
 }
 #endif
 }
