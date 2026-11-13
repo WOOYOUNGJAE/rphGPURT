@@ -30,6 +30,7 @@
 #include "gpurtInternalShaderBindings.h"
 #include "gpurt/gpurtBackend.h"
 #include "gpurt/gpurtInlineFuncs.h"
+#include "gpurtBvhBuilderCommon.h"
 
 #include "palCmdBuffer.h"
 #include "palInlineFuncs.h"
@@ -41,6 +42,10 @@
 #if GPURT_BUILD_RTIP3_1
 #include "shared/gpurtShaderConstants.h"
 #endif
+
+// gpurtBvhBuilderCommon.h defines these with a different signature
+#undef RGP_PUSH_MARKER
+#undef RGP_POP_MARKER
 
 #if GPURT_DEVELOPER
 #if defined(__GNUC__)
@@ -506,6 +511,91 @@ void Device::GetAccelStructPrebuildInfo(
                        deviceSettings);
 
     builder.GetAccelerationStructurePrebuildInfo(buildInfo, pPrebuildInfo);
+}
+
+// =====================================================================================================================
+// Reports the names of the enabled phases that write internal timestamps. The i-th name belongs to the i-th timestamp
+// pair in the query pool.
+void Device::PopulateAccelStructInternalPhaseProperties(
+    const AccelStructEnabledPhasesInfo& enabledPhasesInfo,
+    size_t                              propertiesStride,
+    size_t                              phaseNameStartOffset,
+    uint32*                             pPhaseCount,
+    void*                               pPhasePropertiesData)
+{
+    // Phases with internal timestamps in execution order. Keep this in sync with BvhBatcher::BuildMultiDispatch().
+    static constexpr DetailedBuildPhaseFlags TimedPhases[] =
+    {
+#if GPURT_BUILD_RTIP3_1
+        DetailedBuildPhaseFlags::BuildSingleThreadGroup,
+#endif
+        DetailedBuildPhaseFlags::EncodeQuadPrimitives,
+        DetailedBuildPhaseFlags::EncodePrimitives,
+        DetailedBuildPhaseFlags::BuildParallel,
+        DetailedBuildPhaseFlags::Rebraid,
+        DetailedBuildPhaseFlags::GenerateMortonCodes,
+        DetailedBuildPhaseFlags::MergeSort,
+        DetailedBuildPhaseFlags::OnesweepRadixSort,
+        DetailedBuildPhaseFlags::RadixSort,
+        DetailedBuildPhaseFlags::BuildFastAgglomerativeLbvh,
+        DetailedBuildPhaseFlags::BuildHPLOC,
+        DetailedBuildPhaseFlags::BuildPLOC,
+        DetailedBuildPhaseFlags::PairCompression,
+#if GPURT_BUILD_RTIP3_1
+        DetailedBuildPhaseFlags::RefitInstanceBounds,
+#endif
+        DetailedBuildPhaseFlags::CollapseScratchBvh,
+        DetailedBuildPhaseFlags::EncodeScratchBvh,
+        DetailedBuildPhaseFlags::EncodeHwBvh,
+#if GPURT_BUILD_RTIP3_1
+        DetailedBuildPhaseFlags::CompressPrims,
+        DetailedBuildPhaseFlags::RefitOrientedBounds,
+#endif
+    };
+
+    char*  pPhaseProperties = static_cast<char*>(pPhasePropertiesData);
+    uint32 phaseCount       = 0;
+
+    for (DetailedBuildPhaseFlags phase : TimedPhases)
+    {
+        if (Util::TestAnyFlagSet64(enabledPhasesInfo.enabledInternalPhases, uint64(phase)))
+        {
+            // If only the count was requested there is nothing to write
+            if (pPhaseProperties != nullptr)
+            {
+                Util::Strncpy(pPhaseProperties + (phaseCount * propertiesStride) + phaseNameStartOffset,
+                              DetailedBuildPhaseName(phase),
+                              MaxBuildPhaseNameLength);
+            }
+
+            phaseCount++;
+        }
+    }
+
+    *pPhaseCount = phaseCount;
+}
+
+// =====================================================================================================================
+void Device::GetAccelStructPrebuildInfos(
+    const AccelStructBuildInputs&           buildInfo,
+    AccelStructPrebuildInfo*                pPrebuildInfos,
+    AccelStructEnabledPhasesInfo*           pEnabledPhasesInfo)
+{
+    DeviceSettings deviceSettings;
+    ClientCallbacks clientCb = {};
+
+    SetUpClientCallbacks(&clientCb);
+
+    deviceSettings = m_info.deviceSettings;
+
+    BvhBuilder builder(nullptr,
+                       *m_pBackend,
+                       this,
+                       *m_info.pDeviceProperties,
+                       clientCb,
+                       deviceSettings);
+
+    builder.GetAccelerationStructurePrebuildInfos(buildInfo, pPrebuildInfos, pEnabledPhasesInfo);
 }
 
 // =====================================================================================================================
