@@ -107,6 +107,18 @@ static void PackedTriDescSetInvalidTriangle(
 }
 
 //=====================================================================================================================
+static uint ComputeIndexSectionMidpoint(
+    uint triPairCount,
+    uint primIdPayloadLength,
+    uint primIdAnchorLength)
+{
+    return 1024u -
+           (triPairCount * TRI_PAIR_DESC_SIZE) -
+           (((2 * triPairCount) - 1) * primIdPayloadLength) -
+           primIdAnchorLength;
+}
+
+//=====================================================================================================================
 static uint PackMetadataHeaderBitsLo(
     uint payloadXLengthMinusOne,
     uint payloadYLengthMinusOne,
@@ -1066,28 +1078,37 @@ static bool TryInitTriStructHeader(
     in uint                               triPairCount,
     in bool                               isProcedural,
     in bool                               enableTrailingZeroCompression,
+    in bool                               useFixedLayout,
     inout_param(UnpackedPrimStructHeader) header)
 {
-    const uint trailingZeroLength = FIXED_TRAILING_ZERO_LENGTH;
+    const uint trailingZeroLength = useFixedLayout ? FIXED_TRAILING_ZERO_LENGTH :
+                                    ((isProcedural || !enableTrailingZeroCompression) ?
+                                     0 : CommonTrailingZeroBits(planeUnion));
     uint3 prefixLengths = (isProcedural || !enableTrailingZeroCompression) ?
                            uint3(0, 0, 0) : CommonPrefixBits(planeDiffs);
     prefixLengths = min(prefixLengths, uint3(31 - trailingZeroLength, 31 - trailingZeroLength, 31 - trailingZeroLength));
 
     const uint vertexSize        = 96 - (prefixLengths.x + prefixLengths.y + prefixLengths.z + 3 * trailingZeroLength);
-    const uint primPayloadLength = FIXED_PRIMID_PAYLOAD_SIZE;
-    const uint primAnchorLength  = FIXED_PRIMID_ANCHOR_SIZE;
+    const uint primPayloadLength = useFixedLayout ? FIXED_PRIMID_PAYLOAD_SIZE : (32 - LeadingZeroBits(primIdDiff));
+    const uint primAnchorLength  = useFixedLayout ? FIXED_PRIMID_ANCHOR_SIZE  : (32 - LeadingZeroBits(primIdAnchor));
 
     // Note, geometry ID payload and anchor lengths are encoded as multiple of 2. We need to align the lengths here
     // to account for that
-    const uint geoPayloadLength = FIXED_GEOID_PAYLOAD_SIZE;
-    const uint geoAnchorLength  = FIXED_GEOID_ANCHOR_SIZE;
+    const uint geoPayloadLength = useFixedLayout ? FIXED_GEOID_PAYLOAD_SIZE :
+                                                   Pow2Align(32 - LeadingZeroBits(geoIdDiff), 2);
+    const uint geoAnchorLength  = useFixedLayout ? FIXED_GEOID_ANCHOR_SIZE :
+                                                   Pow2Align(32 - LeadingZeroBits(geoIdAnchor), 2);
 
     const uint pairDescDataSize  = triPairCount * TRI_PAIR_DESC_SIZE;
     const uint idPayloadDataSize = ((2 * triPairCount) - 1) * (primPayloadLength + geoPayloadLength);
     const uint vertexDataSize    = uniqueVertexCount * vertexSize;
     const uint anchorSizes       = prefixLengths.x + prefixLengths.y + prefixLengths.z + primAnchorLength + geoAnchorLength;
     const uint requisiteBits     = pairDescDataSize + idPayloadDataSize + vertexDataSize + anchorSizes;
-    if (requisiteBits > TRI_STRUCT_DATA_SECTION_SIZE_BITS || uniqueVertexCount > 7 || triPairCount > 3)
+    const uint maxUniqueVertexCount = useFixedLayout ? 7 : 16;
+    const uint maxTriPairCount      = useFixedLayout ? 3 : 8;
+    if (requisiteBits > TRI_STRUCT_DATA_SECTION_SIZE_BITS ||
+        uniqueVertexCount > maxUniqueVertexCount ||
+        triPairCount > maxTriPairCount)
     {
         // One pair should always fit
         GPU_ASSERT(triPairCount > 1);
@@ -1106,15 +1127,61 @@ static bool TryInitTriStructHeader(
     header.prefixSourceZ        = vertex0.z;
     header.triPairCountMinusOne = (triPairCount - 1);
 
-    header.payloadXLengthMinusOne = FIXED_PAYLOAD_X_LENGTH - 1;
-    header.payloadYLengthMinusOne = FIXED_PAYLOAD_Y_LENGTH - 1;
-    header.payloadZLengthMinusOne = FIXED_PAYLOAD_Z_LENGTH - 1;
-    header.trailingZeroLength     = trailingZeroLength;
-    header.geoIdAnchorSizeDivTwo  = geoAnchorLength / 2;
-    header.geoIdPayloadSizeDivTwo = geoPayloadLength / 2;
-    header.indexSectionMidpoint   = FIXED_INDEX_SECTION_MIDPOINT;
-    header.primIdAnchorSize       = primAnchorLength;
-    header.primIdPayloadSize      = primPayloadLength;
+    if (useFixedLayout)
+    {
+        header.payloadXLengthMinusOne = FIXED_PAYLOAD_X_LENGTH - 1;
+        header.payloadYLengthMinusOne = FIXED_PAYLOAD_Y_LENGTH - 1;
+        header.payloadZLengthMinusOne = FIXED_PAYLOAD_Z_LENGTH - 1;
+        header.trailingZeroLength     = trailingZeroLength;
+        header.geoIdAnchorSizeDivTwo  = geoAnchorLength / 2;
+        header.geoIdPayloadSizeDivTwo = geoPayloadLength / 2;
+        header.indexSectionMidpoint   = FIXED_INDEX_SECTION_MIDPOINT;
+        header.primIdAnchorSize       = primAnchorLength;
+        header.primIdPayloadSize      = primPayloadLength;
+    }
+    else if (isProcedural)
+    {
+        // store full vertex instead of compressed format
+        //
+        // each vertex is stored as 1 DW (32bit)
+        // min.x
+        // min.y
+        // min.z
+        // max.x
+        // max.y
+        // max.z
+        //
+        // geometryPayload---  0 bit
+        // geometryIdAncor--- 15 bit
+        //------------------- index_section_midpoint
+        // primIdAnchor ----- 32 bit
+        // primIdPayload-----  0 bit
+        // triDesc----------- 29 bit
+        //------------------- 1024bit
+
+        header.payloadXLengthMinusOne = 0;      // decode as 1
+        header.payloadYLengthMinusOne = 0;      // decode as 1
+        header.payloadZLengthMinusOne = 0;      // decode as 1
+        header.trailingZeroLength     = 0;
+
+        header.geoIdPayloadSizeDivTwo = 0x0;
+        header.geoIdAnchorSizeDivTwo  = 0xF;    // decode as 30
+        header.indexSectionMidpoint   = ComputeIndexSectionMidpoint(1, 0, 32);
+        header.primIdAnchorSize       = 0x1F;
+        header.primIdPayloadSize      = 0;
+    }
+    else
+    {
+        header.payloadXLengthMinusOne = (32 - prefixLengths.x - trailingZeroLength) - 1;
+        header.payloadYLengthMinusOne = (32 - prefixLengths.y - trailingZeroLength) - 1;
+        header.payloadZLengthMinusOne = (32 - prefixLengths.z - trailingZeroLength) - 1;
+        header.trailingZeroLength     = trailingZeroLength;
+        header.geoIdAnchorSizeDivTwo  = geoAnchorLength / 2;
+        header.geoIdPayloadSizeDivTwo = geoPayloadLength / 2;
+        header.indexSectionMidpoint   = ComputeIndexSectionMidpoint(triPairCount, primPayloadLength, primAnchorLength);
+        header.primIdAnchorSize       = primAnchorLength;
+        header.primIdPayloadSize      = primPayloadLength;
+    }
 
     return true;
 }

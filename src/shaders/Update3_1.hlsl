@@ -376,8 +376,11 @@ void EncodeUpdate3_1(
                 // Read leaf information and update local child info
                 const uint primStructOffset = metadataSize + childNodeOffset;
 
+                const bool useFixedLayout = Settings.primCompressionFlags & PrimCompFlags::FixedLayout;
+
                 // Fetch geometry index, primitive index and pair descriptor
-                const uint3 geomIdPrimIdDwords = SrcBuffer.Load3(primStructOffset + (24 * 4));
+                const uint geomIdPrimIdDwordOffset = useFixedLayout ? 24 : 28;
+                const uint3 geomIdPrimIdDwords = SrcBuffer.Load3(primStructOffset + (geomIdPrimIdDwordOffset * 4));
                 const uint PairDescDword = SrcBuffer.Load(primStructOffset + (31 * 4));
 
                 TriangleData tri0 = (TriangleData)0;
@@ -387,11 +390,24 @@ void EncodeUpdate3_1(
                 bool isTri1Valid  = false;
                 uint geomId1Dword = 0;
 
-                        // Mariner M5 Fixed Layout format.
-                const uint primId0 = bitFieldExtract(geomIdPrimIdDwords[1], 8, 24) |
-                             (bitFieldExtract(geomIdPrimIdDwords[2], 0, 5) << 24);
-                const uint geomId0 = bitFieldExtract(geomIdPrimIdDwords[0], 16, 16) |
-                             (bitFieldExtract(geomIdPrimIdDwords[1], 0, 8) << 16);
+                uint primId0;
+                uint geomId0;
+
+                if (useFixedLayout)
+                {
+                    // Mariner M5 Fixed Layout format.
+                    primId0 = bitFieldExtract(geomIdPrimIdDwords[1], 8, 24) |
+                              (bitFieldExtract(geomIdPrimIdDwords[2], 0, 5) << 24);
+                    geomId0 = bitFieldExtract(geomIdPrimIdDwords[0], 16, 16) |
+                              (bitFieldExtract(geomIdPrimIdDwords[1], 0, 8) << 16);
+                }
+                else
+                {
+                    primId0 = bitFieldExtract(geomIdPrimIdDwords[1], 5, 27) |
+                              (bitFieldExtract(geomIdPrimIdDwords[2], 0, 4) << 27);
+                    geomId0 = bitFieldExtract(geomIdPrimIdDwords[0], 7, 25) |
+                              (bitFieldExtract(geomIdPrimIdDwords[1], 0, 5) << 25);
+                }
 
                 GPU_ASSERT(geomId0 < ShaderConstants.numDescs);
 
@@ -416,15 +432,35 @@ void EncodeUpdate3_1(
                     // Generate triangle bounds
                     boundingBox = GenerateTriangleBoundingBox(tri0.v0, tri0.v1, tri0.v2);
 
+                    if ((useFixedLayout == false) && (Settings.tlasRefittingMode != TlasRefittingMode::Disabled))
+                    {
+                        UpdateTriangleKdop(tri0.v0, tri0.v1, tri0.v2);
+                    }
+
                     if (isTri1Valid)
                     {
-                        // Mariner M5 Fixed Layout format.
-                        const uint primRemoveMask = ~((1u << 18) - 1u);
-                        const uint geomRemoveMask = ~((1u << 12) - 1u);
-                        const uint primId1 = (primId0 & primRemoveMask) |
-                                            bitFieldExtract(geomIdPrimIdDwords[2], 5, 18);
-                        const uint geomId1 = (geomId0 & geomRemoveMask) |
-                                            bitFieldExtract(geomIdPrimIdDwords[0], 4, 12);
+                        uint primId1;
+                        uint geomId1;
+
+                        if (useFixedLayout)
+                        {
+                            // Mariner M5 Fixed Layout format.
+                            const uint primRemoveMask = ~((1u << 18) - 1u);
+                            const uint geomRemoveMask = ~((1u << 12) - 1u);
+                            primId1 = (primId0 & primRemoveMask) |
+                                      bitFieldExtract(geomIdPrimIdDwords[2], 5, 18);
+                            geomId1 = (geomId0 & geomRemoveMask) |
+                                      bitFieldExtract(geomIdPrimIdDwords[0], 4, 12);
+                        }
+                        else
+                        {
+                            geomId1Dword = SrcBuffer.Load(primStructOffset + (27 * 4));
+
+                            primId1 = bitFieldExtract(geomIdPrimIdDwords[2], 4, 28) |
+                                      (bitFieldExtract(PairDescDword, 0, 3) << 28);
+                            geomId1 = bitFieldExtract(geomId1Dword, 9, 23) |
+                                      (bitFieldExtract(geomIdPrimIdDwords[0], 0, 7) << 23);
+                        }
 
                         GPU_ASSERT(geomId1 < ShaderConstants.numDescs);
 
@@ -443,6 +479,11 @@ void EncodeUpdate3_1(
                         // Generate triangle bounds
                         const BoundingBox bbox1 = GenerateTriangleBoundingBox(tri1.v0, tri1.v1, tri1.v2);
                         boundingBox = CombineAABB(boundingBox, bbox1);
+
+                        if ((useFixedLayout == false) && (Settings.tlasRefittingMode != TlasRefittingMode::Disabled))
+                        {
+                            UpdateTriangleKdop(tri1.v0, tri1.v1, tri1.v2);
+                        }
                     }
                 }
                 else
@@ -462,6 +503,7 @@ void EncodeUpdate3_1(
                                      isTri1Valid,
                                      geomIdPrimIdDwords,
                                      PairDescDword,
+                                     geomId1Dword,
                                      primStructOffset,
                                      isProcedural);
             }

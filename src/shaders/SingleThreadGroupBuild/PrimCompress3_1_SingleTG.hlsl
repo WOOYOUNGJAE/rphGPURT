@@ -94,7 +94,9 @@ static void WriteTwoTriPrimStruct(
     // triDesc 1 -------- 29 bits
     //------------------- 1024 bits
 
-    const uint indexSectionMidpoint = FIXED_INDEX_SECTION_MIDPOINT;
+    const uint indexSectionMidpoint =
+        (Settings.primCompressionFlags & PrimCompFlags::FixedLayout) ? FIXED_INDEX_SECTION_MIDPOINT :
+                                                                      ComputeIndexSectionMidpoint(2, 31, 31);
 
     uint d[PRIMITIVE_STRUCT_SIZE_IN_DW];
 

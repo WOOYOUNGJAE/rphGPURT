@@ -122,21 +122,41 @@ struct Encoder
 
         newEncoder.triPairCount = g_laneGroup.Broadcast(triPairCount, index);
 
-        newEncoder.payloadXLength = FIXED_PAYLOAD_X_LENGTH;
-        newEncoder.payloadYLength = FIXED_PAYLOAD_Y_LENGTH;
-        newEncoder.payloadZLength = FIXED_PAYLOAD_Z_LENGTH;
+        newEncoder.geoIdAnchor  = g_laneGroup.Broadcast(geoIdAnchor, index);
+        newEncoder.primIdAnchor = g_laneGroup.Broadcast(primIdAnchor, index);
 
-        newEncoder.trailingZeroLength = FIXED_TRAILING_ZERO_LENGTH;
+        if (Settings.primCompressionFlags & PrimCompFlags::FixedLayout)
+        {
+            newEncoder.payloadXLength = FIXED_PAYLOAD_X_LENGTH;
+            newEncoder.payloadYLength = FIXED_PAYLOAD_Y_LENGTH;
+            newEncoder.payloadZLength = FIXED_PAYLOAD_Z_LENGTH;
 
-        newEncoder.geoIdAnchor      = g_laneGroup.Broadcast(geoIdAnchor, index);
-        newEncoder.geoIdAnchorSize  = FIXED_GEOID_ANCHOR_SIZE;
-        newEncoder.geoIdPayloadSize = FIXED_GEOID_PAYLOAD_SIZE;
+            newEncoder.trailingZeroLength = FIXED_TRAILING_ZERO_LENGTH;
 
-        newEncoder.primIdAnchor      = g_laneGroup.Broadcast(primIdAnchor, index);
-        newEncoder.primIdAnchorSize  = FIXED_PRIMID_ANCHOR_SIZE;
-        newEncoder.primIdPayloadSize = FIXED_PRIMID_PAYLOAD_SIZE;
+            newEncoder.geoIdAnchorSize  = FIXED_GEOID_ANCHOR_SIZE;
+            newEncoder.geoIdPayloadSize = FIXED_GEOID_PAYLOAD_SIZE;
 
-        newEncoder.indexSectionMidpoint = FIXED_INDEX_SECTION_MIDPOINT;
+            newEncoder.primIdAnchorSize  = FIXED_PRIMID_ANCHOR_SIZE;
+            newEncoder.primIdPayloadSize = FIXED_PRIMID_PAYLOAD_SIZE;
+
+            newEncoder.indexSectionMidpoint = FIXED_INDEX_SECTION_MIDPOINT;
+        }
+        else
+        {
+            newEncoder.payloadXLength = g_laneGroup.Broadcast(payloadXLength, index);
+            newEncoder.payloadYLength = g_laneGroup.Broadcast(payloadYLength, index);
+            newEncoder.payloadZLength = g_laneGroup.Broadcast(payloadZLength, index);
+
+            newEncoder.trailingZeroLength = g_laneGroup.Broadcast(trailingZeroLength, index);
+
+            newEncoder.geoIdAnchorSize  = g_laneGroup.Broadcast(geoIdAnchorSize, index);
+            newEncoder.geoIdPayloadSize = g_laneGroup.Broadcast(geoIdPayloadSize, index);
+
+            newEncoder.primIdAnchorSize  = g_laneGroup.Broadcast(primIdAnchorSize, index);
+            newEncoder.primIdPayloadSize = g_laneGroup.Broadcast(primIdPayloadSize, index);
+
+            newEncoder.indexSectionMidpoint = g_laneGroup.Broadcast(indexSectionMidpoint, index);
+        }
 
         return newEncoder;
     }
@@ -278,8 +298,31 @@ struct Encoder
 
     void WriteMetadata()
     {
-        const uint headerLo = PackFixedMetadataHeaderBitsLo(triPairCount);
-        const uint headerHi = PackFixedMetadataHeaderBitsHi();
+        uint headerLo;
+        uint headerHi;
+
+        if (Settings.primCompressionFlags & PrimCompFlags::FixedLayout)
+        {
+            headerLo = PackFixedMetadataHeaderBitsLo(triPairCount);
+            headerHi = PackFixedMetadataHeaderBitsHi();
+        }
+        else
+        {
+            headerLo = PackMetadataHeaderBitsLo(
+                payloadXLength - 1,
+                payloadYLength - 1,
+                payloadZLength - 1,
+                trailingZeroLength,
+                geoIdAnchorSize / 2,
+                geoIdPayloadSize / 2,
+                triPairCount - 1,
+                false /* unorm16 */);
+
+            headerHi = PackMetadataHeaderBitsHi(
+                primIdAnchorSize,
+                primIdPayloadSize,
+                indexSectionMidpoint);
+        }
 
         WriteDw(0, headerLo);
         WriteDw(1, headerHi);
@@ -305,7 +348,10 @@ struct Encoder
         geoIdAnchor  = geoIdAnchor_;
         triPairCount = triPairCount_;
 
-        const bool enableTrailingZeroCompression = false;
+        const bool useFixedLayout = Settings.primCompressionFlags & PrimCompFlags::FixedLayout;
+
+        const bool enableTrailingZeroCompression =
+            (Settings.primCompressionFlags & PrimCompFlags::EnableTrailingZeroAndPrefix) && (useFixedLayout == false);
 
         trailingZeroLength = enableTrailingZeroCompression ? CommonTrailingZeroBits(planeUnion) : 0;
 
@@ -315,13 +361,13 @@ struct Encoder
 
         const uint vertexSize =	96 - (prefixLengths.x + prefixLengths.y + prefixLengths.z + 3 * trailingZeroLength);
 
-        primIdPayloadSize = 18; // 32 - LeadingZeroBits(primIdDiff);
-        primIdAnchorSize  = 29; // 32 - LeadingZeroBits(primIdAnchor);
+        primIdPayloadSize = useFixedLayout ? FIXED_PRIMID_PAYLOAD_SIZE : (32 - LeadingZeroBits(primIdDiff));
+        primIdAnchorSize  = useFixedLayout ? FIXED_PRIMID_ANCHOR_SIZE  : (32 - LeadingZeroBits(primIdAnchor));
 
         // Note, geometry ID payload and anchor lengths are encoded as multiple of 2. We need to align the lengths here
         // to account for that
-        geoIdPayloadSize = 12; // Pow2Align(32 - LeadingZeroBits(geoIdDiff), 2);
-        geoIdAnchorSize  = 24; // Pow2Align(32 - LeadingZeroBits(geoIdAnchor), 2);
+        geoIdPayloadSize = useFixedLayout ? FIXED_GEOID_PAYLOAD_SIZE : Pow2Align(32 - LeadingZeroBits(geoIdDiff), 2);
+        geoIdAnchorSize  = useFixedLayout ? FIXED_GEOID_ANCHOR_SIZE  : Pow2Align(32 - LeadingZeroBits(geoIdAnchor), 2);
 
         const uint pairDescDataSize  = triPairCount * TRI_PAIR_DESC_SIZE;
         const uint idPayloadDataSize = ((2 * triPairCount) - 1) * (primIdPayloadSize + geoIdPayloadSize);
@@ -331,8 +377,13 @@ struct Encoder
         const uint requisiteBits
             = pairDescDataSize + idPayloadDataSize + vertexDataSize + anchorSizes;
 
+        const uint maxUniqueVertexCount = useFixedLayout ? 7 : 16;
+        const uint maxTriPairCount      = useFixedLayout ? 3 : 8;
+
         const bool valid =
-            ((requisiteBits <= TRI_STRUCT_DATA_SECTION_SIZE_BITS) && (uniqueVertexCount <= 7) && (triPairCount <= 3));
+            ((requisiteBits <= TRI_STRUCT_DATA_SECTION_SIZE_BITS) &&
+             (uniqueVertexCount <= maxUniqueVertexCount) &&
+             (triPairCount <= maxTriPairCount));
 
         if (valid)
         {
@@ -340,11 +391,22 @@ struct Encoder
             GPU_ASSERT((prefixLengths.y + trailingZeroLength) <= 31);
             GPU_ASSERT((prefixLengths.z + trailingZeroLength) <= 31);
 
-            payloadXLength = FIXED_PAYLOAD_X_LENGTH;
-            payloadYLength = FIXED_PAYLOAD_Y_LENGTH;
-            payloadZLength = FIXED_PAYLOAD_Z_LENGTH;
+            if (useFixedLayout)
+            {
+                payloadXLength = FIXED_PAYLOAD_X_LENGTH;
+                payloadYLength = FIXED_PAYLOAD_Y_LENGTH;
+                payloadZLength = FIXED_PAYLOAD_Z_LENGTH;
 
-            indexSectionMidpoint = FIXED_INDEX_SECTION_MIDPOINT;
+                indexSectionMidpoint = FIXED_INDEX_SECTION_MIDPOINT;
+            }
+            else
+            {
+                payloadXLength = (32 - prefixLengths.x - trailingZeroLength);
+                payloadYLength = (32 - prefixLengths.y - trailingZeroLength);
+                payloadZLength = (32 - prefixLengths.z - trailingZeroLength);
+
+                indexSectionMidpoint = ComputeIndexSectionMidpoint(triPairCount, primIdPayloadSize, primIdAnchorSize);
+            }
         }
 
         // One pair should always fit
@@ -409,7 +471,8 @@ static TriCompressState ComputeCompressedRanges(
     bool     isTri0,
     bool     compressMultiplePairs)
 {
-    const uint maxPairs = compressMultiplePairs ? 3 : 1;
+    const uint maxCompressedPairs = (Settings.primCompressionFlags & PrimCompFlags::FixedLayout) ? 3 : 8;
+    const uint maxPairs = compressMultiplePairs ? maxCompressedPairs : 1;
 
     const uint childIdx       = countbits64(primRangeStartMask & bits64(primListIndex)) + numBoxChildren;
     const bool primRangeStart = (primRangeStartMask & bit64(primListIndex));
@@ -665,11 +728,188 @@ static void EmitPrimitiveStructures(
     }
 }
 
+//=====================================================================================================================
+// Create a Primitive Structure containing a single triangle pair
+// NOTE: This function is used by the Trivial Builder, so it cannot use scratch memory or LDS.
+static void WritePairPrimStructVariableLayout(
+    TriangleData tri0,
+    bool         tri0Opaque,
+    uint         tri0PrimitiveIndex,
+    uint         tri0GeometryIndex,
+    bool         isTri1Valid,
+    TriangleData tri1,
+    bool         tri1Opaque,
+    uint         tri1PrimitiveIndex,
+    uint         tri1GeometryIndex,
+    uint         nodeOffset)
+{
+    uint d[PRIMITIVE_STRUCT_SIZE_IN_DW];
+
+    for (uint i = 0; i < PRIMITIVE_STRUCT_SIZE_IN_DW; ++i)
+    {
+        d[i] = 0;
+    }
+
+    const uint indexSectionMidpoint = ComputeIndexSectionMidpoint(1, 31, 31);
+
+    if (Settings.geometryType == GEOMETRY_TYPE_AABBS)
+    {
+        // HW would detect "malformed_vtx" based on index and payloadlength
+        // Since procedural node index are 0xF
+        // here we manually pack payloadLength to be 1 (payloadLengthMinusOne = 0)
+        // in order to prevent HW decode proceduralNodes as "malformed_vtx"
+        //
+        // i.e., procedural node needs to be packed as:
+        // payloadXLengthMinusOne = 0;      // decode as 1
+        // payloadYLengthMinusOne = 0;      // decode as 1
+        // payloadZLengthMinusOne = 0;      // decode as 1
+        // trailingZeroLength     = 0;
+
+        d[0] = PackMetadataHeaderBitsLo(0, 0, 0, 0, 15, 15, 0, false);
+        d[1] = PackMetadataHeaderBitsHi(31, 31, indexSectionMidpoint);
+
+        // tri0 v0 is encoded as float3(0, 0, 0) to report invalid triangle vertices as origin.
+
+        // AABB min/max are written to unused section of the primitive packet.
+        d[5]  = asuint(tri0.v0.x);
+        d[6]  = asuint(tri0.v0.y);
+        d[7]  = asuint(tri0.v0.z);
+        d[8]  = asuint(tri0.v1.x);
+        d[9]  = asuint(tri0.v1.y);
+        d[10] = asuint(tri0.v1.z);
+
+        // Geometry IDs
+        d[28] = bitFieldInsert(d[28], 7, 25, tri0GeometryIndex);
+        d[29] = bitFieldInsert(0,     0,  5, tri0GeometryIndex >> 25);
+
+        // Index section midpoint
+
+        // Primitive IDs
+        d[29] = bitFieldInsert(d[29], 5, 27, tri0PrimitiveIndex);
+        d[30] = bitFieldInsert(d[30], 0,  4, tri0PrimitiveIndex >> 27);
+
+        // Triangle descriptor
+        uint triDesc = 1 << TRI_DESC_PRIM_RANGE_STOP_BIT_SHIFT;
+        // Mark this node as procedural by setting triangle 0 indices to 0xff, 0xff, x
+        PackedTriDescSetTriangle(0, 0xff, 0xff, 0xff, (uint) tri0Opaque, triDesc);
+        // Encode triangle 1 as degenerate triangle at vertex0.
+        PackedTriDescSetTriangle(1, 0, 0, 0, 0, triDesc);
+
+        d[31] = bitFieldInsert(d[31], 3, 29, triDesc);
+    }
+    else
+    {
+        // Store full vertex with no compression
+        //
+        // Each vertex is stored as 3 DW (32bit) without prefix
+        //
+        // Header ----------- 52 bits
+        // Vertex Data ------ 576 bits (96 * 3 * 2)
+        // ----- Unused ----- 245 bits
+        // geometryId1Payload 30 bits
+        // geometryIdAnchor-- 30 bits
+        //------------------- indexSectionMidpoint
+        // primIdAnchor ----- 31 bits
+        // primId1Payload---- 31 bits
+        // triDesc----------- 29 bits
+        //------------------- 1024 bits
+        d[0] = PackMetadataHeaderBitsLo(31, 31, 31, 0, 15, 15, 0, false);
+
+        d[1] = PackMetadataHeaderBitsHi(31, 31, indexSectionMidpoint);
+
+        uint triDesc = 1 << TRI_DESC_PRIM_RANGE_STOP_BIT_SHIFT;
+
+        // tri0 v0
+        d[1] = bitFieldInsert(d[1], 20, 12, asuint(tri0.v0.x));
+        d[2] = bitFieldInsert(0,     0, 20, asuint(tri0.v0.x) >> 12);
+        d[2] = bitFieldInsert(d[2], 20, 12, asuint(tri0.v0.y));
+        d[3] = bitFieldInsert(0,     0, 20, asuint(tri0.v0.y) >> 12);
+        d[3] = bitFieldInsert(d[3], 20, 12, asuint(tri0.v0.z));
+        d[4] = bitFieldInsert(0,     0, 20, asuint(tri0.v0.z) >> 12);
+        // tri0 v1
+        d[4] = bitFieldInsert(d[4], 20, 12, asuint(tri0.v1.x));
+        d[5] = bitFieldInsert(0,     0, 20, asuint(tri0.v1.x) >> 12);
+        d[5] = bitFieldInsert(d[5], 20, 12, asuint(tri0.v1.y));
+        d[6] = bitFieldInsert(0,     0, 20, asuint(tri0.v1.y) >> 12);
+        d[6] = bitFieldInsert(d[6], 20, 12, asuint(tri0.v1.z));
+        d[7] = bitFieldInsert(0,     0, 20, asuint(tri0.v1.z) >> 12);
+
+        // tri0 v2
+        d[7]  = bitFieldInsert(d[7], 20, 12, asuint(tri0.v2.x));
+        d[8]  = bitFieldInsert(0,     0, 20, asuint(tri0.v2.x) >> 12);
+        d[8]  = bitFieldInsert(d[8], 20, 12, asuint(tri0.v2.y));
+        d[9]  = bitFieldInsert(0,     0, 20, asuint(tri0.v2.y) >> 12);
+        d[9]  = bitFieldInsert(d[9], 20, 12, asuint(tri0.v2.z));
+        d[10] = bitFieldInsert(0,     0, 20, asuint(tri0.v2.z) >> 12);
+
+        PackedTriDescSetTriangle(0, 0, 1, 2, (uint) tri0Opaque, triDesc);
+
+        if (isTri1Valid)
+        {
+            // tri1 v0
+            d[10] = bitFieldInsert(d[10], 20, 12, asuint(tri1.v0.x));
+            d[11] = bitFieldInsert(0,      0, 20, asuint(tri1.v0.x) >> 12);
+            d[11] = bitFieldInsert(d[11], 20, 12, asuint(tri1.v0.y));
+            d[12] = bitFieldInsert(0,      0, 20, asuint(tri1.v0.y) >> 12);
+            d[12] = bitFieldInsert(d[12], 20, 12, asuint(tri1.v0.z));
+            d[13] = bitFieldInsert(0,      0, 20, asuint(tri1.v0.z) >> 12);
+            // tri1 v1
+            d[13] = bitFieldInsert(d[13], 20, 12, asuint(tri1.v1.x));
+            d[14] = bitFieldInsert(0,      0, 20, asuint(tri1.v1.x) >> 12);
+            d[14] = bitFieldInsert(d[14], 20, 12, asuint(tri1.v1.y));
+            d[15] = bitFieldInsert(0,      0, 20, asuint(tri1.v1.y) >> 12);
+            d[15] = bitFieldInsert(d[15], 20, 12, asuint(tri1.v1.z));
+            d[16] = bitFieldInsert(0,      0, 20, asuint(tri1.v1.z) >> 12);
+            // tri1 v2
+            d[16] = bitFieldInsert(d[16], 20, 12, asuint(tri1.v2.x));
+            d[17] = bitFieldInsert(0,      0, 20, asuint(tri1.v2.x) >> 12);
+            d[17] = bitFieldInsert(d[17], 20, 12, asuint(tri1.v2.y));
+            d[18] = bitFieldInsert(0,      0, 20, asuint(tri1.v2.y) >> 12);
+            d[18] = bitFieldInsert(d[18], 20, 12, asuint(tri1.v2.z));
+            d[19] = bitFieldInsert(0,      0, 20, asuint(tri1.v2.z) >> 12);
+
+            PackedTriDescSetTriangle(1, 3, 4, 5, (uint) tri1Opaque, triDesc);
+
+            // Geometry IDs
+            d[27] = bitFieldInsert(0, 9, 23, tri1GeometryIndex);
+            d[28] = bitFieldInsert(0, 0,  7, tri1GeometryIndex >> 23);
+
+            // Primitive IDs
+            d[30] = bitFieldInsert(0, 4, 28, tri1PrimitiveIndex);
+            d[31] = bitFieldInsert(0, 0,  3, tri1PrimitiveIndex >> 28);
+        }
+        else
+        {
+            // Set tri1 to invalid
+            PackedTriDescSetInvalidTriangle(1, triDesc);
+        }
+
+        // Geometry IDs
+        d[28] = bitFieldInsert(d[28], 7, 25, tri0GeometryIndex);
+        d[29] = bitFieldInsert(0,     0,  5, tri0GeometryIndex >> 25);
+
+        // Index section midpoint
+
+        // Primitive IDs
+        d[29] = bitFieldInsert(d[29], 5, 27, tri0PrimitiveIndex);
+        d[30] = bitFieldInsert(d[30], 0,  4, tri0PrimitiveIndex >> 27);
+
+        // Triangle descriptor
+        d[31] = bitFieldInsert(d[31], 3, 29, triDesc);
+    }
+
+    [unroll]
+    for (uint i = 0; i < PRIMITIVE_STRUCT_SIZE_IN_DW; i += 4)
+    {
+        DstBuffer.Store4(nodeOffset + (i*4), uint4(d[i], d[i+1], d[i+2], d[i+3]));
+    }
+}
+
 //======================================================================================================================
 // Important!! Fixed Layout Apply.
 // Create a Primitive Structure containing a single triangle pair
 // NOTE: This function is used by the Trivial Builder, so it cannot use scratch memory or LDS.
-static void WritePairPrimStruct(
+static void WritePairPrimStructFixedLayout(
     TriangleData tri0,
     bool         tri0Opaque,
     uint         tri0PrimitiveIndex,
@@ -851,6 +1091,49 @@ static void WritePairPrimStruct(
     for (uint i = 0; i < PRIMITIVE_STRUCT_SIZE_IN_DW; i += 4)
     {
         DstBuffer.Store4(nodeOffset + (i*4), uint4(d[i], d[i+1], d[i+2], d[i+3]));
+    }
+}
+
+//======================================================================================================================
+// Create a Primitive Structure containing a single triangle pair
+// NOTE: This function is used by the Trivial Builder, so it cannot use scratch memory or LDS.
+static void WritePairPrimStruct(
+    TriangleData tri0,
+    bool         tri0Opaque,
+    uint         tri0PrimitiveIndex,
+    uint         tri0GeometryIndex,
+    bool         isTri1Valid,
+    TriangleData tri1,
+    bool         tri1Opaque,
+    uint         tri1PrimitiveIndex,
+    uint         tri1GeometryIndex,
+    uint         nodeOffset)
+{
+    if (Settings.primCompressionFlags & PrimCompFlags::FixedLayout)
+    {
+        WritePairPrimStructFixedLayout(tri0,
+                                       tri0Opaque,
+                                       tri0PrimitiveIndex,
+                                       tri0GeometryIndex,
+                                       isTri1Valid,
+                                       tri1,
+                                       tri1Opaque,
+                                       tri1PrimitiveIndex,
+                                       tri1GeometryIndex,
+                                       nodeOffset);
+    }
+    else
+    {
+        WritePairPrimStructVariableLayout(tri0,
+                                          tri0Opaque,
+                                          tri0PrimitiveIndex,
+                                          tri0GeometryIndex,
+                                          isTri1Valid,
+                                          tri1,
+                                          tri1Opaque,
+                                          tri1PrimitiveIndex,
+                                          tri1GeometryIndex,
+                                          nodeOffset);
     }
 }
 

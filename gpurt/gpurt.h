@@ -942,7 +942,7 @@ struct DeviceSettings
                                                                 // A value of 0 implies the builder is disabled.
 #endif
 #if GPURT_BUILD_RTIP3_1
-    uint32                      primCompressionFlags;        // Debug flags for RTIP3.1+ primitive compression
+    uint32                      primCompressionFlags;        // RTIP3.1+ primitive compression mode (PrimCompMode)
     uint32                      maxPrimRangeSize;            // Maximum number of triangles in a prim range
     uint32                      enableOrientedBoundingBoxes; // Enable oriented bounding box traversal and build
     uint32                      tlasRefittingMode;           // Enable TLAS leaf node refitting
