@@ -367,6 +367,7 @@ enum class InternalRayTracingCsType : uint32
     EncodeHwBvh3_1,
     CollapseScratchBvh,
     EncodeScratchBvh,
+    CollapseAndEncodeScratchBvh,
     Update3_1,
     RefitInstanceBounds,
     BlasStats3_1,
@@ -1179,8 +1180,13 @@ enum class BoxSortHeuristic : uint32
 enum class WideNodeMergingFlags : uint32
 {
     None          = 0x0,
-    BLAS          = 0x1,
-    TLAS          = 0x2,
+    Enable        = 0x1,  // BLAS merging in one pass (CollapseAndEncodeScratchBvh), the default merge method. Uses the
+                          // wide leaf count stored in the BVH2 nodes. The pass is EncodeHwBvh3_1 plus the merging, so
+                          // every BLAS uses it with this bit; BLAS builds that do not merge (update allowed) run it
+                          // with merging off.
+    LegacyTwoPass = 0x2,  // BLAS merging in two passes (CollapseScratchBvh + EncodeScratchBvh, ScratchWideNode).
+                          // Turns merging on by itself, and wins over Enable (3 = two pass).
+    // 0x4, 0x8: unused
 };
 
 // Ray history trace

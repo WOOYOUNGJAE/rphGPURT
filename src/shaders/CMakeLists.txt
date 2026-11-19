@@ -55,8 +55,10 @@ set(gpurtHlsl
     EncodeHwBvhCommon3_1.hlsl
     EncodeHwBvh3_1.hlsl
     ScratchBvh/MergeScratchNodes.hlsli
+    ScratchBvh/MergePack.hlsli
     ScratchBvh/CollapseScratchBvh.hlsl
     ScratchBvh/EncodeScratchBvh.hlsl
+    ScratchBvh/CollapseAndEncodeScratchBvh.hlsl
     QBVH8Common.hlsl
     ../shadersClean/common/LaneGroup.hlsli
 #endif

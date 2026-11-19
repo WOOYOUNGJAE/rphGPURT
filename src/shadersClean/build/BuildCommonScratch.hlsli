@@ -316,6 +316,33 @@ float FetchScratchNodeCost(
     return FetchScratchNodeData<float>(baseScratchNodesOffset, nodeIndex, SCRATCH_NODE_COST_OFFSET);
 }
 
+#if GPURT_BUILD_RTIP3_1
+//=====================================================================================================================
+// Wide leaf count (one pass merging, WideNodeMergingFlags 0x1 without 0x2): number of leaf children a full wide collapse (PullUp) of a BLAS
+// node gives. A BVH2 leaf or a prim range is 1, any other node is the sum of its two children.
+// PullUp opens every box of a subtree whose count is 8 or less, so a node is a leaf-only box with exactly that many
+// leaves when the count is <= 8. Larger counts are clamped to WIDE_LEAF_COUNT_NOT_LEAF_ONLY (the node fills 8 slots).
+#define WIDE_LEAF_COUNT_NOT_LEAF_ONLY 9u
+
+//=====================================================================================================================
+bool IsWideLeafCountEnabled()
+{
+    // The builder writes the merging flags only for merging builds, with LEGACY_TWO_PASS for the two pass merge
+    return ((Settings.wideNodeMergingFlags & (WIDE_NODE_MERGING_FLAG_ENABLE | WIDE_NODE_MERGING_FLAG_LEGACY_TWO_PASS)) ==
+            WIDE_NODE_MERGING_FLAG_ENABLE) &&
+           (Settings.topLevelBuild == false);
+}
+
+//=====================================================================================================================
+// Only valid when IsWideLeafCountEnabled(). Leaves do not store the count (offset 40 is vertex data there).
+uint FetchScratchNodeWideLeafCount(
+    in ScratchNode node,
+    in bool        isLeaf)
+{
+    return isLeaf ? 1u : asuint(node.sah_or_v2_or_instBasePtr.z);
+}
+#endif
+
 //=====================================================================================================================
 uint FetchSortedPrimIndex(
     uint baseSortedPrimIndicesOffset,
@@ -1030,7 +1057,37 @@ void MergeScratchNodes(
             }
         }
 
-        WriteScratchNodeCost(scratchNodesOffset, mergedNodeIndex, bestCost);
+#if GPURT_BUILD_RTIP3_1
+        // (SinglePass) Wide leaf count. The prim range test is the one PullUp uses (IsLeafOrIsCollapsed).
+        // The cost, the surface area (the same value written above) and the count are adjacent, so they go out as one
+        // store in place of the cost store. The count then costs no extra store instruction.
+#if (SCRATCH_NODE_SA_OFFSET != (SCRATCH_NODE_COST_OFFSET + 4)) || \
+    (SCRATCH_NODE_WIDE_LEAF_COUNT_OFFSET != (SCRATCH_NODE_COST_OFFSET + 8))
+#error "SinglePass: cost, surface area and wide leaf count must be adjacent in ScratchNode"
+#endif
+        if (IsWideLeafCountEnabled())
+        {
+            const bool isPrimRange = CollapseAnyPairs() ? (numTris == 2) : isCollapsed;
+
+            uint wideLeafCount = 1;
+            if (isPrimRange == false)
+            {
+                const uint leftCount  = FetchScratchNodeWideLeafCount(leftNode, IsLeafNode(leftNodeIndex, numActivePrims));
+                const uint rightCount =
+                    FetchScratchNodeWideLeafCount(rightNode, IsLeafNode(rightNodeIndex, numActivePrims));
+                wideLeafCount = min(leftCount + rightCount, WIDE_LEAF_COUNT_NOT_LEAF_ONLY);
+            }
+
+            WriteScratchNodeData(scratchNodesOffset,
+                                 mergedNodeIndex,
+                                 SCRATCH_NODE_COST_OFFSET,
+                                 uint3(asuint(bestCost), asuint(mergedBoxSurfaceArea), wideLeafCount));
+        }
+        else
+#endif
+        {
+            WriteScratchNodeCost(scratchNodesOffset, mergedNodeIndex, bestCost);
+        }
         WriteScratchNodeNumPrimitives(scratchNodesOffset, mergedNodeIndex, numTris, isCollapsed);
     }
 }

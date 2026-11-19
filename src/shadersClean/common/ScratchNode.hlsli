@@ -40,6 +40,8 @@ struct ScratchNode
     uint   right_or_geometryIndex;         // right child for internal nodes /
                                            // geometryIndex if it's a leaf node
     float3 sah_or_v2_or_instBasePtr;       // SAH cost, area and density for internal nodes /
+                                           // (.z as uint: wide leaf count of BLAS internal nodes when
+                                           //  one pass merging (WideNodeMergingFlags 0x1), see SCRATCH_NODE_WIDE_LEAF_COUNT_OFFSET) /
                                            // vertex2 for triangle nodes /
                                            // instanceNodeBasePointerLo, instanceNodeBasePointerHi for instance node
     uint   parent;
@@ -72,6 +74,9 @@ struct ScratchNode
 #define SCRATCH_NODE_GEOMETRY_INDEX_OFFSET            SCRATCH_NODE_RIGHT_OFFSET
 #define SCRATCH_NODE_COST_OFFSET                      32
 #define SCRATCH_NODE_SA_OFFSET                        36
+// Internal BLAS nodes only (one pass merging, WideNodeMergingFlags 0x1): number of leaf children a full wide collapse of the node
+// gives, clamped to WIDE_LEAF_COUNT_NOT_LEAF_ONLY. Written in MergeScratchNodes() (BuildCommonScratch.hlsli).
+#define SCRATCH_NODE_WIDE_LEAF_COUNT_OFFSET           40
 #define SCRATCH_NODE_V2_OFFSET                        SCRATCH_NODE_COST_OFFSET
 #define SCRATCH_NODE_INSTANCE_BASE_PTR_OFFSET         SCRATCH_NODE_V2_OFFSET
 #define SCRATCH_NODE_PARENT_OFFSET                    44

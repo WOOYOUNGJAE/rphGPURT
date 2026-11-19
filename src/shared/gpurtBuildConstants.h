@@ -58,7 +58,8 @@ struct RayTracingScratchDataOffsets
     uint32 atomicFlagsPloc;     // BVH PLOC build only
     uint32 reserved0;
     uint32 scratchWideNodeCounter; // Number of scratch wide nodes
-    uint32 bvhWideNodeData;     // Wide node merging build only
+    uint32 bvhWideNodeData;     // Wide node merging build only. 2-pass: ScratchWideNodes. 1-pass (SinglePass): block
+                                // descriptors (SINGLE_PASS_BLOCK_DESC_*), not ScratchWideNodes
     uint32 wideNodeEncodingDoneCounter;
     uint32 sceneBounds;
     uint32 mortonCodes;

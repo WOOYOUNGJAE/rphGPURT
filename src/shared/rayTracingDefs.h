@@ -162,6 +162,25 @@ static_assert(BLAS_OBB_METADATA_SIZE == sizeof(BlasObbMetadata));
 #define OBB_TABLE_ENCODED_BITS_OFFSET    0
 #define OBB_TABLE_SA_OFFSET              4
 #define OBB_TABLE_ENTRY_SIZE             8
+
+// WideNodeMergingFlags bits read by shaders (same values as GpuRt::WideNodeMergingFlags). The builder writes them only for
+// builds that merge, normalized: ENABLE is set on every merging build, LEGACY_TWO_PASS too when it merges in
+// CollapseScratchBvh + EncodeScratchBvh. A build that does not merge sees 0.
+#define WIDE_NODE_MERGING_FLAG_ENABLE          0x1u
+#define WIDE_NODE_MERGING_FLAG_LEGACY_TWO_PASS 0x2u
+
+// (SinglePass) Block descriptor of CollapseAndEncodeScratchBvh: one per parent stack index (< internal node count), in
+// the bvhWideNodeData scratch region. That region holds ScratchWideNodes only in the 2-pass merge.
+//   [0, 32)     : BVH2 root index of the box child in each slot (only block member slots are written)
+//   INFO_OFFSET : follower slot mask [0:7], (size - 1) 3 bits per slot [8:31]
+// The block task loads 4 slot dwords from the leader slot (at most 6), i.e. up to byte 40, so the stride must be at
+// least 40 bytes. The info dword is the last dword, so only the stride needs to change.
+#define SINGLE_PASS_BLOCK_DESC_STRIDE          64u
+#define SINGLE_PASS_BLOCK_DESC_CHILDREN_OFFSET 0u
+#define SINGLE_PASS_BLOCK_DESC_INFO_OFFSET     (SINGLE_PASS_BLOCK_DESC_STRIDE - 4u)
+#ifdef __cplusplus
+static_assert(SINGLE_PASS_BLOCK_DESC_STRIDE >= 40, "The block task reads up to byte 40 of a block descriptor");
+#endif
 #endif
 
 //=====================================================================================================================

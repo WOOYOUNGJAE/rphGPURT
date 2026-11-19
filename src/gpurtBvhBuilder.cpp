@@ -1147,6 +1147,7 @@ BvhBuilder::ScratchBufferInfo BvhBuilder::CalculateScratchBufferInfoDefault(
     uint32 bvhNodeData = 0xFFFFFFFF;
     uint32 bvhLeafNodeData = 0xFFFFFFFF;
     uint32 bvhWideNodeData = 0xFFFFFFFF; // TODO : Replace this if it can be written directly into the BVH2 scratch node data (bvhNodeData) buffer.
+                                         // (SinglePass) holds block descriptors instead, see SINGLE_PASS_BLOCK_DESC_*
     uint32 fastLBVHRootNodeIndex = 0xFFFFFFFF;
 #if GPURT_BUILD_RTIP3_1
     uint32 primCompNodeIndices = 0xFFFFFFFF;
@@ -1355,15 +1356,27 @@ BvhBuilder::ScratchBufferInfo BvhBuilder::CalculateScratchBufferInfoDefault(
             primCompNodeIndicesEnd = runningOffset;
         }
 #endif
-        if (m_buildConfig.enableWideNodeMerging)
+        if (m_buildConfig.enableTwoPassWideNodeMerging)
         {
             // Counter offsets must be assigned consecutively.
             scratchWideNodeCounter = ReserveBytes(sizeof(uint32), &runningOffset);
             wideNodeEncodingDoneCounter = ReserveBytes(sizeof(uint32), &runningOffset);
 
+            // ScratchWideNodes of CollapseScratchBvh + EncodeScratchBvh
             static constexpr size_t RayTracingScratchWideNodeSize = 64;
             bvhWideNodeData = ReserveBytes(nodeCount * RayTracingScratchWideNodeSize, &runningOffset);
         }
+#if GPURT_BUILD_RTIP3_1
+        else if (m_buildConfig.enableSinglePassWideNodeMerging)
+        {
+            // (SinglePass) bvhWideNodeData holds the block descriptors of CollapseAndEncodeScratchBvh, not
+            // ScratchWideNodes: one per parent stack index, and stack indices are below the internal node count.
+            // No counters. Aligned to 64 bytes, so a 64-byte descriptor does not straddle a cache line.
+            runningOffset = Util::Pow2Align(runningOffset, 64u);
+            bvhWideNodeData =
+                ReserveBytes(GetNumInternalNodeCount() * SINGLE_PASS_BLOCK_DESC_STRIDE, &runningOffset);
+        }
+#endif
 #if SOGANG_EXPERIMENT
         sgDebugCounters = ReserveBytes(sizeof(uint32) * 8, &runningOffset);
 #endif
@@ -2006,11 +2019,38 @@ void BvhBuilder::InitBuildConfig(
     }
 #endif
 
+    // WideNodeMergingFlags: BLAS only (TLAS merging is not supported). Enable (0x1) merges in one pass
+    // (CollapseAndEncodeScratchBvh), LegacyTwoPass (0x2) in CollapseScratchBvh + EncodeScratchBvh. LegacyTwoPass turns
+    // merging on by itself and wins over Enable.
+    const uint32 wideNodeMergingFlags = m_deviceSettings.wideNodeMergingFlags;
+    const bool   useLegacyTwoPassMerging =
+        (wideNodeMergingFlags & static_cast<uint32>(GpuRt::WideNodeMergingFlags::LegacyTwoPass)) != 0;
+    const bool   wideNodeMergingRequested = useLegacyTwoPassMerging ||
+        ((wideNodeMergingFlags & static_cast<uint32>(GpuRt::WideNodeMergingFlags::Enable)) != 0);
+
     m_buildConfig.enableWideNodeMerging =
-        UpdateAllowed() == false &&
-        m_buildConfig.shouldUseTrivialBuilder == false &&
-        ((m_buildConfig.topLevelBuild == true && (m_deviceSettings.wideNodeMergingFlags & static_cast<uint32>(GpuRt::WideNodeMergingFlags::TLAS))) ||
-        (m_buildConfig.topLevelBuild == false && (m_deviceSettings.wideNodeMergingFlags & static_cast<uint32>(GpuRt::WideNodeMergingFlags::BLAS))));
+        (UpdateAllowed() == false) &&
+        (m_buildConfig.shouldUseTrivialBuilder == false) &&
+        (m_buildConfig.topLevelBuild == false) &&
+        wideNodeMergingRequested;
+
+    // (SinglePass) One pass merging. CollapseAndEncodeScratchBvh is EncodeHwBvh3_1 plus the merging, so when one pass
+    // merging is requested every BLAS encode runs it. BLAS builds that do not merge (update allowed, ...) run it with
+    // merging off, which gives the same BVH as EncodeHwBvh3_1.
+    m_buildConfig.useSinglePassEncode = false;
+#if GPURT_BUILD_RTIP3_1
+    m_buildConfig.useSinglePassEncode =
+        (m_buildConfig.topLevelBuild == false) &&
+        (m_pDevice->GetRtIpLevel() == Pal::RayTracingIpLevel::RtIp3_1) &&
+        wideNodeMergingRequested &&
+        (useLegacyTwoPassMerging == false);
+#endif
+    m_buildConfig.enableSinglePassWideNodeMerging =
+        m_buildConfig.enableWideNodeMerging && m_buildConfig.useSinglePassEncode;
+    // The CollapseScratchBvh + EncodeScratchBvh merging (see the encode phase selection). Only this path uses
+    // ScratchWideNodes and the wide node counters.
+    m_buildConfig.enableTwoPassWideNodeMerging =
+        m_buildConfig.enableWideNodeMerging && (m_buildConfig.useSinglePassEncode == false);
 
     // Max geometries we can fit in the SRD table for merged encode buiping ld/update
     const uint32 maxDescriptorTableSize = (m_cmdBuffer != nullptr) ?
@@ -2685,7 +2725,8 @@ void BvhBuilder::InitAccelerationStructure()
     ResetTaskQueueCounters(m_scratchOffsets.rebraidTaskQueueCounter);
     ResetTaskQueueCounters(m_scratchOffsets.plocTaskQueueCounter);
 
-    if (m_buildConfig.enableWideNodeMerging)
+    // Same condition as the counter allocation in CalculateScratchBufferInfo (the 1-pass merging has no counters)
+    if (m_buildConfig.enableTwoPassWideNodeMerging)
     {
         const uint numScratchWideNodeCounters = 2;
         const gpusize wideNodeMergingOffset = ScratchBufferBaseVa() + m_scratchOffsets.scratchWideNodeCounter;
@@ -2960,7 +3001,18 @@ void BvhBuilder::InitBuildSettings()
     m_buildSettings.obbNumLevels                 = m_deviceSettings.obbNumLevels;
 #endif
     m_buildSettings.boxSplittingFlags            = m_deviceSettings.boxSplittingFlags;
-    m_buildSettings.wideNodeMergingFlags         = m_deviceSettings.wideNodeMergingFlags;
+    // Normalized for the shaders (WIDE_NODE_MERGING_FLAG_*): 0 for builds that do not merge, so they run the same shader
+    // code as without merging. Merging builds get ENABLE, plus LEGACY_TWO_PASS for the two pass merge.
+    // The ENABLE-only form makes the BVH2 build store wide leaf counts and CollapseAndEncodeScratchBvh merge.
+    m_buildSettings.wideNodeMergingFlags = 0;
+    if (m_buildConfig.enableWideNodeMerging)
+    {
+        m_buildSettings.wideNodeMergingFlags = static_cast<uint32>(GpuRt::WideNodeMergingFlags::Enable);
+        if (m_buildConfig.enableTwoPassWideNodeMerging)
+        {
+            m_buildSettings.wideNodeMergingFlags |= static_cast<uint32>(GpuRt::WideNodeMergingFlags::LegacyTwoPass);
+        }
+    }
     m_buildSettings.enableBvhChannelBalancing    = m_deviceSettings.enableBvhChannelBalancing;
     m_buildSettings.tlasRefittingMode            = m_deviceSettings.tlasRefittingMode;
     // TLAS Refitting is disabled for procedural geometry
@@ -4200,7 +4252,12 @@ BuildPhaseFlags BvhBuilder::EnabledPhases() const
             {
                 flags |= BuildPhaseFlags::PairCompression;
             }
-            if (m_buildConfig.enableWideNodeMerging)
+            if (m_buildConfig.useSinglePassEncode)
+            {
+                // Merges only when enableSinglePassWideNodeMerging, otherwise the same as EncodeHwBvh
+                flags |= BuildPhaseFlags::CollapseAndEncodeScratchBvh;
+            }
+            else if (m_buildConfig.enableWideNodeMerging)
             {
                 flags |= BuildPhaseFlags::CollapseScratchBvh;
                 flags |= BuildPhaseFlags::EncodeScratchBvh;
@@ -4780,6 +4837,36 @@ void BvhBuilder::EncodeScratchBvh()
     INTERNAL_TIMESTAMP_BEGIN();
 
     RGP_PUSH_MARKER("Encode Scratch BVH (nodeCount %u)", nodeCount);
+    Dispatch(numThreadGroups);
+    RGP_POP_MARKER();
+
+    INTERNAL_TIMESTAMP_END();
+}
+
+// =====================================================================================================================
+// (SinglePass, WideNodeMergingFlags 0x1) EncodeHwBvh with the CollapseScratchBvh + EncodeScratchBvh merging in the same
+// dispatch. Merging is decided from the wide leaf counts that the BVH2 build stored in the scratch nodes. Builds that
+// do not merge run it with merging off (same as EncodeHwBvh). Same dispatch size and bindings as EncodeHwBvh.
+void BvhBuilder::CollapseAndEncodeScratchBvh()
+{
+    BindPipeline(InternalRayTracingCsType::CollapseAndEncodeScratchBvh);
+
+    const uint32 nodeCount       = GetNumInternalNodeCount();
+    const uint32 numThreadGroups = Util::RoundUpQuotient(nodeCount, DefaultThreadGroupSize);
+
+    BuildShaderRootConstants0 shaderConstants =
+    {
+       .numThreads = numThreadGroups * DefaultThreadGroupSize
+    };
+#if GPURT_BUILD_RTIP3_1
+    WriteBuildBufferBindings(shaderConstants, BuildBufferBindingFlags::ObbLut);
+#else
+    WriteBuildBufferBindings(shaderConstants);
+#endif
+
+    INTERNAL_TIMESTAMP_BEGIN();
+
+    RGP_PUSH_MARKER("Collapse And Encode Scratch BVH (nodeCount %u)", nodeCount);
     Dispatch(numThreadGroups);
     RGP_POP_MARKER();
 
