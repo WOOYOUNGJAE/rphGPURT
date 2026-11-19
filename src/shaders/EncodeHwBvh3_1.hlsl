@@ -1390,10 +1390,13 @@ static void EncodeCompressedBoxNode(
 
             if (IsObbTableExtended())
             {
-                // (Best4) 16 byte entry
+                // (Best4) 16 byte entry. Only the candidates are read on this path; the original best field is
+                // filled as in EncodeScratchBvh.
+                const uint origBest = (bestObbMatrixIdx << 3) | aabbMaxChildIdx;
                 const uint obbFlagsOffset =
                     ShaderConstants.offsets.qbvhObbFlags + (bvhNodeDstIdx * OBB_TABLE_EXTENDED_ENTRY_SIZE);
-                ScratchGlobal.Store<uint4>(obbFlagsOffset, uint4(encodedBits, asuint(aabbSum), 0, obbCandidates));
+                ScratchGlobal.Store<uint4>(obbFlagsOffset,
+                                           uint4(encodedBits, asuint(aabbSum), origBest, obbCandidates));
             }
             else
             {

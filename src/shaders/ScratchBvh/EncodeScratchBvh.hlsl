@@ -450,6 +450,32 @@ static void EncodeCompressedBoxNode(
         const float aabbMax = laneGroup.Max(aabbSa);
         const uint aabbMaxChildIdx = laneGroup.GetFirstActiveLaneIndex(aabbSa == aabbMax);
 
+        // (Loosen DOBB, deprecated) Pick the OBB child with each block's surface area split over its members, so a
+        // child outside any block can win over a block. Without LOOSEN_DOBB these equal the original values.
+        uint  loosenObbChildIdx = aabbMaxChildIdx; // child whose orientation this node uses
+        float loosenAabbSum     = aabbSum;         // AABB surface area sum the refit compares the OBB against
+#if LOOSEN_DOBB
+        if (IsLoosenDobbEnabled())
+        {
+            uint numBlockMembers = 1;
+            if (childIsBox)
+            {
+                // A block runs from its leader up to the next child that is not a follower. Lane 0 is always a leader.
+                const uint notFollowerMask = ~followerBoxMask & bits(LANE_GROUP_SIZE);
+                const uint laneAndBelow    = bits(laneGroup.laneIndex + 1);
+                const uint blockLeaderLane = firstbithigh(notFollowerMask & laneAndBelow);
+                const uint nextLeaderLane  = firstbitlow((notFollowerMask | (1u << LANE_GROUP_SIZE)) & ~laneAndBelow);
+                numBlockMembers = nextLeaderLane - blockLeaderLane;
+                GPU_ASSERT(numBlockMembers > 0);
+            }
+
+            const float loosenSa  = aabbSa / float(numBlockMembers);
+            const float loosenMax = laneGroup.Max(loosenSa);
+            loosenAabbSum     = laneGroup.Sum(loosenSa);
+            loosenObbChildIdx = laneGroup.GetFirstActiveLaneIndex(loosenSa == loosenMax);
+        }
+#endif
+
         // (Best4) Merged leaf-only node: every leaf's matrix is a candidate. numBoxChildren and the follower count
         // (packedFlags bits 17..19) are the same on all lanes.
         const bool collectObbCandidates = IsObbBest4Enabled() && (numBoxChildren == 0) &&
@@ -459,8 +485,8 @@ static void EncodeCompressedBoxNode(
                                                (collectObbCandidates == false);
 
         uint bestObbMatrixIdx = INVALID_OBB;
-        if (((aabbMaxChildIdx == laneGroup.laneIndex) || collectObbCandidates || collectChildObbCandidates) &&
-            (childIsLeaf))
+        if (((aabbMaxChildIdx == laneGroup.laneIndex) || (loosenObbChildIdx == laneGroup.laneIndex) ||
+             collectObbCandidates || collectChildObbCandidates) && (childIsLeaf))
         {
             uint packedFlags = childScratchNode.packedFlags;
 
@@ -494,6 +520,9 @@ static void EncodeCompressedBoxNode(
         }
 
         const uint leafObbMatrixIdx = bestObbMatrixIdx; // this lane's leaf matrix (when computed above)
+
+        // Leaf matrix of the loosened best child (same as the original one when Loosen DOBB is off)
+        const uint loosenObbMatrixIdx = laneGroup.Broadcast(bestObbMatrixIdx, loosenObbChildIdx);
         bestObbMatrixIdx = laneGroup.Broadcast(bestObbMatrixIdx, aabbMaxChildIdx);
 
         // (Best4) Candidates for the refit (OBB_TABLE_CANDIDATES_OFFSET); candidate 0 is the current choice
@@ -501,10 +530,10 @@ static void EncodeCompressedBoxNode(
         if (collectObbCandidates)
         {
             // Merged leaf-only node: the next largest leaves' matrices, without duplicates
-            obbCandidates = bitFieldInsert(obbCandidates, 0, 8, bestObbMatrixIdx);
+            obbCandidates = bitFieldInsert(obbCandidates, 0, 8, loosenObbMatrixIdx);
 
             bool isUnlisted = childIsLeaf && (leafObbMatrixIdx != INVALID_OBB) &&
-                              (leafObbMatrixIdx != bestObbMatrixIdx);
+                              (leafObbMatrixIdx != loosenObbMatrixIdx);
             [unroll]
             for (uint k = 1; k < OBB_NUM_MATRIX_CANDIDATES; ++k)
             {
@@ -523,14 +552,14 @@ static void EncodeCompressedBoxNode(
         {
             // As in EncodeHwBvh3_1, with a box child named by its lane (= its refit lane).
             const uint laneSlot = childIsLeaf ? leafObbMatrixIdx : (OBB_CANDIDATE_BOX_LANE_BIT | laneGroup.laneIndex);
-            obbCandidates = bitFieldInsert(obbCandidates, 0, 8, laneGroup.Broadcast(laneSlot, aabbMaxChildIdx));
+            obbCandidates = bitFieldInsert(obbCandidates, 0, 8, laneGroup.Broadcast(laneSlot, loosenObbChildIdx));
 
             // The members of a merged block get the same matrix from the refit, so a block takes one candidate.
             // childBlock is the lane of the block leader, and the lane itself for every other child.
             const uint childBlock = firstbithigh(~followerBoxMask & bits(laneGroup.laneIndex + 1));
 
             bool isUnpicked = (childIsLeaf || childIsBox) &&
-                              (childBlock != laneGroup.Broadcast(childBlock, aabbMaxChildIdx)) &&
+                              (childBlock != laneGroup.Broadcast(childBlock, loosenObbChildIdx)) &&
                               (laneSlot != OBB_CANDIDATE_EMPTY);
             [unroll]
             for (uint k = 1; k < OBB_NUM_MATRIX_CANDIDATES; ++k)
@@ -599,20 +628,29 @@ static void EncodeCompressedBoxNode(
             // b[22:24] : Child index with maximum AABB surface area for this node.
             // b[25:31] : OBB matrix index of the best leaf node amongst the children. This is precomputed and stored in
             //           scratch node during morton code generation phase to absorb the VGPR impact of that computation.
-            const uint encodedBits = (bestObbMatrixIdx << OBB_FLAGS_BIT_OFFSET_OBB_MATRIX_INDEX) |
-                                     (aabbMaxChildIdx  << OBB_FLAGS_BIT_OFFSET_AABB_MAX_CHILD_INDEX) |
-                                     (leafStartMask    << OBB_FLAGS_BIT_OFFSET_LEAF_START_MASK) |
-                                     ((numLeaderBoxChildren ^ 0xFu) + 1);
-
             if (IsObbTableExtended())
             {
-                // (Best4) 16 byte entry
+                // 16 byte entry: loosened best child and split surface area sum, then the original best child (passed
+                // up to the parent with Loosen DOBB) and the candidates. Without Loosen DOBB the loosened values equal
+                // the original ones.
+                const uint encodedBits = (loosenObbMatrixIdx << OBB_FLAGS_BIT_OFFSET_OBB_MATRIX_INDEX) |
+                                         (loosenObbChildIdx  << OBB_FLAGS_BIT_OFFSET_AABB_MAX_CHILD_INDEX) |
+                                         (leafStartMask      << OBB_FLAGS_BIT_OFFSET_LEAF_START_MASK) |
+                                         ((numLeaderBoxChildren ^ 0xFu) + 1);
+                const uint origBest = (bestObbMatrixIdx << 3) | aabbMaxChildIdx;
+
                 const uint obbFlagsOffset =
                     ShaderConstants.offsets.qbvhObbFlags + (bvhNodeDstIdx * OBB_TABLE_EXTENDED_ENTRY_SIZE);
-                ScratchGlobal.Store<uint4>(obbFlagsOffset, uint4(encodedBits, asuint(aabbSum), 0, obbCandidates));
+                ScratchGlobal.Store<uint4>(obbFlagsOffset,
+                                           uint4(encodedBits, asuint(loosenAabbSum), origBest, obbCandidates));
             }
             else
             {
+                const uint encodedBits = (bestObbMatrixIdx << OBB_FLAGS_BIT_OFFSET_OBB_MATRIX_INDEX) |
+                                         (aabbMaxChildIdx  << OBB_FLAGS_BIT_OFFSET_AABB_MAX_CHILD_INDEX) |
+                                         (leafStartMask    << OBB_FLAGS_BIT_OFFSET_LEAF_START_MASK) |
+                                         ((numLeaderBoxChildren ^ 0xFu) + 1);
+
                 const uint obbFlagsOffset =
                     ShaderConstants.offsets.qbvhObbFlags + (bvhNodeDstIdx * OBB_TABLE_ENTRY_SIZE);
                 ScratchGlobal.Store<uint2>(obbFlagsOffset, uint2(encodedBits, asuint(aabbSum)));

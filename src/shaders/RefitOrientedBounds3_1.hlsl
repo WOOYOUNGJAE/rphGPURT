@@ -545,6 +545,9 @@ void RefitOrientedBoundsImpl(
         uint parentIndex = 0;
         uint obbFlags = 0;
         float aabbSASum = 0.0f;
+#if LOOSEN_DOBB
+        uint origBestPacked = 0; // (Loosen DOBB) (leaf matrix index << 3) | child index of the unsplit max SA child
+#endif
         uint obbCandidates  = OBB_CANDIDATES_ALL_EMPTY; // (Best4) 4 x 8 bit candidate slots
 
         if (laneGroup.IsFirstLane())
@@ -557,7 +560,13 @@ void RefitOrientedBoundsImpl(
 
             const uint flagsOffset = ShaderConstants.offsets.qbvhObbFlags + (curNodeIndex * GetObbTableEntrySize());
             obbFlags = ScratchGlobal.Load<uint>(flagsOffset);
-            aabbSASum = ScratchGlobal.Load<float>(flagsOffset + OBB_TABLE_SA_OFFSET);
+            aabbSASum = ScratchGlobal.Load<float>(flagsOffset + OBB_TABLE_SA_OFFSET); // split sum with Loosen DOBB
+#if LOOSEN_DOBB
+            if (IsLoosenDobbEnabled())
+            {
+                origBestPacked = ScratchGlobal.Load<uint>(flagsOffset + OBB_TABLE_LOOSEN_ORIG_BEST_OFFSET);
+            }
+#endif
             if (IsObbBest4Enabled())
             {
                 obbCandidates = ScratchGlobal.Load<uint>(flagsOffset + OBB_TABLE_CANDIDATES_OFFSET);
@@ -570,6 +579,9 @@ void RefitOrientedBoundsImpl(
         exponentsChildIndexAndChildCount = laneGroup.ReadFirstLane(exponentsChildIndexAndChildCount);
         obbFlags = laneGroup.ReadFirstLane(obbFlags);
         aabbSASum = laneGroup.ReadFirstLane(aabbSASum);
+#if LOOSEN_DOBB
+        origBestPacked = laneGroup.ReadFirstLane(origBestPacked);
+#endif
         obbCandidates = laneGroup.ReadFirstLane(obbCandidates);
 
         // Bit k of the mask is set when a block member's leaf segment starts at leaf k. A zero mask means this is
@@ -653,9 +665,32 @@ void RefitOrientedBoundsImpl(
 
         bestObbMatrixIndex = laneGroup.Broadcast(bestObbMatrixIndex, bestObbLaneIndex);
 
+        // (Loosen DOBB) Number of slots in this lane's merged block, 1 otherwise. Surface areas are split by it, for
+        // the candidates below and the OBB check further down.
+        uint numBlockMembers = 1;
+#if LOOSEN_DOBB
+        if (IsLoosenDobbEnabled())
+        {
+            // A box child whose left sibling has NodeRangeLength 0 is a follower in that sibling's block.
+            const bool isBoxSlot       = isChildValid && (childIsLeaf == false);
+            const uint boxSlotMask     = laneGroup.Ballot(isBoxSlot);
+            const uint followerMask    =
+                (laneGroup.Ballot(isBoxSlot && (childInfo.NodeRangeLength() == 0)) << 1) & boxSlotMask;
+            const uint notFollowerMask = ~followerMask & bits(LANE_GROUP_SIZE);
+            const uint laneAndBelow    = bits(laneGroup.laneIndex + 1);
+            if (isBoxSlot)
+            {
+                const uint blockLeaderLane = firstbithigh(notFollowerMask & laneAndBelow);
+                const uint nextLeaderLane  = firstbitlow((notFollowerMask | (1u << LANE_GROUP_SIZE)) & ~laneAndBelow);
+                numBlockMembers = nextLeaderLane - blockLeaderLane;
+            }
+        }
+#endif
+
         // (Best4) Try every candidate the encode stored (see OBB_ENABLE_FLAG_BEST4) and keep the one with the
         // smallest sum of child OBB surface areas. Candidate 0 is bestObbMatrixIndex, so this never does worse by that
         // measure. Leaf children are re-projected from their triangles, box children use their K-DOP as below.
+        bool usedObbCandidates = false;
         if (IsObbBest4Enabled() &&
             (((obbCandidates >> 8) & 0xffu) != OBB_CANDIDATE_EMPTY)) // a second candidate exists
         {
@@ -707,7 +742,7 @@ void RefitOrientedBoundsImpl(
                     {
                         childObb = ComputeBoxNodeOBB(childKdopOfs, candidate);
                     }
-                    childObbSa = ComputeBoxSurfaceArea(childObb);
+                    childObbSa = ComputeBoxSurfaceArea(childObb) / float(numBlockMembers);
                 }
                 const float candidateSaSum = laneGroup.Sum(childObbSa);
                 if (candidateSaSum < bestCandidateSaSum) // ties keep the earlier candidate
@@ -717,7 +752,24 @@ void RefitOrientedBoundsImpl(
                 }
             }
             bestObbMatrixIndex = bestCandidate;
+            usedObbCandidates  = true;
         }
+
+        // (Loosen DOBB) The node passes up the orientation of its unsplit max surface area child, so loosening does not
+        // spread upward. A matrix picked by Best4 is passed up as is.
+        uint obbMatrixIndexToParent = bestObbMatrixIndex;
+#if LOOSEN_DOBB
+        if (IsLoosenDobbEnabled() && (usedObbCandidates == false))
+        {
+            const uint origBestLaneIndex = origBestPacked & 0x7u;
+            obbMatrixIndexToParent = origBestPacked >> 3; // leaf matrix, replaced below if the child is a box
+            if ((laneGroup.laneIndex == origBestLaneIndex) && (childIsLeaf == false))
+            {
+                obbMatrixIndexToParent = ScratchGlobal.Load<uint>(childKdopOfs + OBBKDOP_OBBMATRIX_INDEX_OFFSET);
+            }
+            obbMatrixIndexToParent = laneGroup.Broadcast(obbMatrixIndexToParent, origBestLaneIndex);
+        }
+#endif
 
         // Walk the block members one at a time. Every member keeps the bounding box its parent saw before merging,
         // so it needs a K-DOP of its own, but only one of them is live at a time and the group shared K-DOP is
@@ -828,7 +880,8 @@ void RefitOrientedBoundsImpl(
         // Verify if OBB fits better than original AABBs.
         if (bestObbMatrixIndex != INVALID_OBB)
         {
-            const float obbSA = ComputeBoxSurfaceArea(candidateObb);
+            // (Loosen DOBB) split over block members, like aabbSASum
+            const float obbSA = ComputeBoxSurfaceArea(candidateObb) / float(numBlockMembers);
             const float obbSASum = laneGroup.Sum(obbSA);
 
             if (obbSASum >= (aabbSASum * OBB_SA_FACTOR_THRESHOLD))
@@ -883,12 +936,14 @@ void RefitOrientedBoundsImpl(
 
         // The matrix index belongs to the node, so every member slot carries the same one.
         // The K-DOP planes were already written per member inside the loop above.
+        // (Loosen DOBB) Pass up obbMatrixIndexToParent, but INVALID_OBB when this node rejected its OBB.
+        const uint matrixIndexForParent = (bestObbMatrixIndex == INVALID_OBB) ? INVALID_OBB : obbMatrixIndexToParent;
         if (laneGroup.laneIndex < blockMemberIndex)
         {
             const uint memberKdopOfs = ShaderConstants.offsets.qbvhKdops +
                 (GetBlockMemberKdopIndex(curNodeIndex, followerSlotBase, laneGroup.laneIndex) * sizeof(ObbKdop));
 
-            ScratchGlobal.Store(memberKdopOfs + (KDOP_PLANE_COUNT * sizeof(float2)), bestObbMatrixIndex);
+            ScratchGlobal.Store(memberKdopOfs + (KDOP_PLANE_COUNT * sizeof(float2)), matrixIndexForParent);
         }
 
 #if (MERGE_BOX_NODES_FLAG == 2)

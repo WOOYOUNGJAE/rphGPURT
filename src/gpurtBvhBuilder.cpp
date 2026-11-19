@@ -405,7 +405,8 @@ uint32 BvhBuilder::GetMaxInternalNodeChildCount() const
 
 #if GPURT_BUILD_RTIP3_1
 // =====================================================================================================================
-// Size of one OBB table entry (qbvhObbFlags): 16 bytes with Best4, see rayTracingDefs.h.
+// Size of one OBB table entry (qbvhObbFlags): 16 bytes with Best4 (or Loosen DOBB when compiled in), see
+// rayTracingDefs.h.
 uint32 BvhBuilder::GetObbTableEntrySize() const
 {
     return ((m_buildConfig.enableOrientedBoundingBoxes & OBB_TABLE_EXTENDED_FLAGS) != 0) ?
@@ -2086,8 +2087,8 @@ void BvhBuilder::InitBuildConfig(
         m_buildConfig.enableEarlyPairCompression = false;
     }
 
-    // Best4 (also on all nodes) needs the BLAS OBB refit path, whose encode (EncodeHwBvh3_1, EncodeScratchBvh or
-    // CollapseAndEncodeScratchBvh) writes the 16 byte OBB table entry. Drop the bits elsewhere.
+    // Best4 (also on all nodes) and Loosen DOBB need the BLAS OBB refit path, whose encode (EncodeHwBvh3_1,
+    // EncodeScratchBvh or CollapseAndEncodeScratchBvh) writes the 16 byte OBB table entry. Drop the bits elsewhere.
     {
         const bool usesSingleThreadGroupBuild =
             (m_buildConfig.shouldUseTrivialBuilder == false) && UseSingleThreadGroupBuild();
@@ -2098,6 +2099,13 @@ void BvhBuilder::InitBuildConfig(
             (m_deviceSettings.enableParallelBuild == false) &&
             (usesSingleThreadGroupBuild == false);
 
+#if LOOSEN_DOBB
+        // Loosen DOBB needs merging
+        if ((usesBlasObbRefitPath == false) || (m_buildConfig.enableWideNodeMerging == false))
+        {
+            m_buildConfig.enableOrientedBoundingBoxes &= ~OBB_ENABLE_FLAG_LOOSEN_DOBB;
+        }
+#endif
         if (usesBlasObbRefitPath == false)
         {
             m_buildConfig.enableOrientedBoundingBoxes &= ~OBB_ENABLE_FLAG_BEST4;

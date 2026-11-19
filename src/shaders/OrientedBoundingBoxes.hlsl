@@ -36,6 +36,15 @@ bool IsObbEnabled()
     return (Settings.enableOrientedBoundingBoxes & bit(Settings.topLevelBuild ? TOP_LEVEL : BOTTOM_LEVEL)) != 0;
 }
 
+#if LOOSEN_DOBB
+//=====================================================================================================================
+// Loosen DOBB (deprecated). The builder keeps the bit only for merged BLAS builds with BLAS OBBs.
+bool IsLoosenDobbEnabled()
+{
+    return (Settings.enableOrientedBoundingBoxes & OBB_ENABLE_FLAG_LOOSEN_DOBB) != 0;
+}
+#endif
+
 //=====================================================================================================================
 // Best4 OBB matrices. See OBB_ENABLE_FLAG_BEST4.
 bool IsObbBest4Enabled()
@@ -51,7 +60,7 @@ bool IsObbBest4AllNodes()
 }
 
 //=====================================================================================================================
-// Whether the OBB table uses the 16 byte entry (Best4)
+// Whether the OBB table uses the 16 byte entry (Best4, or Loosen DOBB when compiled in)
 bool IsObbTableExtended()
 {
     return (Settings.enableOrientedBoundingBoxes & OBB_TABLE_EXTENDED_FLAGS) != 0;

@@ -163,9 +163,19 @@ static_assert(BLAS_OBB_METADATA_SIZE == sizeof(BlasObbMetadata));
 #define OBB_TABLE_SA_OFFSET              4
 #define OBB_TABLE_ENTRY_SIZE             8
 
-// 16 byte OBB table entry (Best4): the 8 byte entry, then
-//   +8  : unused (0)
-//   +12 : 4 x 8 bit candidates: an OBB matrix index, or OBB_CANDIDATE_BOX_LANE_BIT | lane of a box child
+// Loosen DOBB (deprecated, compiled out unless LOOSEN_DOBB is 1): splits a merged block's AABB surface area over its
+// members when picking the OBB orientation child and in the OBB vs AABB check.
+#ifndef LOOSEN_DOBB
+#define LOOSEN_DOBB 0
+#endif
+#if LOOSEN_DOBB
+#define OBB_ENABLE_FLAG_LOOSEN_DOBB      0x20u
+#define OBB_TABLE_LOOSEN_ORIG_BEST_OFFSET 8
+#endif
+
+// 16 byte OBB table entry (Best4, Loosen DOBB): the 8 byte entry (Loosen DOBB: loosened best child and split sum),
+//   +8  : (Loosen DOBB) (leaf matrix index << 3) | child index of the unsplit max surface area child
+//   +12 : (Best4) 4 x 8 bit candidates: an OBB matrix index, or OBB_CANDIDATE_BOX_LANE_BIT | lane of a box child
 #define OBB_TABLE_EXTENDED_ENTRY_SIZE    16
 
 // Best4 OBB matrices (BLAS OBB refit path only): the encode stores up to 4 candidate matrices, candidate 0 being
@@ -179,7 +189,11 @@ static_assert(BLAS_OBB_METADATA_SIZE == sizeof(BlasObbMetadata));
 #define OBB_CANDIDATE_EMPTY              0x7fu
 #define OBB_CANDIDATE_BOX_LANE_BIT       0x80u
 #define OBB_CANDIDATES_ALL_EMPTY         0x7f7f7f7fu
-#define OBB_TABLE_EXTENDED_FLAGS         OBB_ENABLE_FLAG_BEST4
+#if LOOSEN_DOBB
+#define OBB_TABLE_EXTENDED_FLAGS (OBB_ENABLE_FLAG_LOOSEN_DOBB | OBB_ENABLE_FLAG_BEST4)
+#else
+#define OBB_TABLE_EXTENDED_FLAGS OBB_ENABLE_FLAG_BEST4
+#endif
 
 // WideNodeMergingFlags bits read by shaders (same values as GpuRt::WideNodeMergingFlags). The builder writes them only for
 // builds that merge, normalized: ENABLE is set on every merging build, LEGACY_POST_COLLAPSE too for the post-collapse
