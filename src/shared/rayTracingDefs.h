@@ -163,6 +163,24 @@ static_assert(BLAS_OBB_METADATA_SIZE == sizeof(BlasObbMetadata));
 #define OBB_TABLE_SA_OFFSET              4
 #define OBB_TABLE_ENTRY_SIZE             8
 
+// 16 byte OBB table entry (Best4): the 8 byte entry, then
+//   +8  : unused (0)
+//   +12 : 4 x 8 bit candidates: an OBB matrix index, or OBB_CANDIDATE_BOX_LANE_BIT | lane of a box child
+#define OBB_TABLE_EXTENDED_ENTRY_SIZE    16
+
+// Best4 OBB matrices (BLAS OBB refit path only): the encode stores up to 4 candidate matrices, candidate 0 being
+// the usual choice, and the refit keeps the one with the smallest sum of child OBB surface areas. Leaf-only nodes
+// (merged ones when merging) try their largest leaves' matrices; ALL_NODES adds every other node (a block counts once).
+#define OBB_ENABLE_FLAG_BEST4            0x4u
+#define OBB_ENABLE_FLAG_BEST4_ALL_NODES  0x8u
+
+#define OBB_TABLE_CANDIDATES_OFFSET      12
+#define OBB_NUM_MATRIX_CANDIDATES        4
+#define OBB_CANDIDATE_EMPTY              0x7fu
+#define OBB_CANDIDATE_BOX_LANE_BIT       0x80u
+#define OBB_CANDIDATES_ALL_EMPTY         0x7f7f7f7fu
+#define OBB_TABLE_EXTENDED_FLAGS         OBB_ENABLE_FLAG_BEST4
+
 // WideNodeMergingFlags bits read by shaders (same values as GpuRt::WideNodeMergingFlags). The builder writes them only for
 // builds that merge, normalized: ENABLE is set on every merging build, LEGACY_POST_COLLAPSE too for the post-collapse
 // merge (CollapseScratchBvh + EncodeScratchBvh). A build that does not merge sees 0.

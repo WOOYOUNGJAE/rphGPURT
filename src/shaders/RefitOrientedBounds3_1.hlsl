@@ -422,6 +422,66 @@ BoundingBox ComputeBoxNodeOBB(
 }
 
 //=====================================================================================================================
+// (Best4) OBB of a primitive node's triangles in the given matrix frame, without touching any K-DOP.
+// Same triangle walk as ComputePrimNodeKDop.
+BoundingBox ComputePrimNodeObbOnly(
+    in uint nodeType,
+    in uint nodeAddr,
+    in uint obbMatrixIndex)
+{
+    const float3x3 obbMatrix = OBBIndexToMatrix(obbMatrixIndex);
+
+    BoundingBox obb = (BoundingBox)0;
+    obb.min = float3(+FLT_MAX, +FLT_MAX, +FLT_MAX);
+    obb.max = float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+
+    uint currPairIdx = GetPairIndexFromNodeType(nodeType);
+    uint currNodeAddr = nodeAddr;
+    bool endOfRange = true;
+
+    do
+    {
+        const PrimStructHeader header = DstBuffer.Load<PrimStructHeader>(currNodeAddr);
+        const TrianglePairDesc pairDesc = ReadTrianglePairDescFromNode(currNodeAddr, currPairIdx);
+        const uint3 prefixes = ReadVertexPrefixesFromNode(currNodeAddr, header);
+
+        const TriangleData tri0 = ReadTriangleVerticesFromNode(currNodeAddr, header, prefixes, pairDesc, 0);
+        const BoundingBox  tri0ObbBounds = ComputeOBBFromTri(tri0.v0, tri0.v1, tri0.v2, obbMatrix);
+        obb.min = min(obb.min, tri0ObbBounds.min);
+        obb.max = max(obb.max, tri0ObbBounds.max);
+
+        if (pairDesc.Tri1Valid())
+        {
+            const TriangleData tri1 = ReadTriangleVerticesFromNode(currNodeAddr, header, prefixes, pairDesc, 1);
+            const BoundingBox  tri1ObbBounds = ComputeOBBFromTri(tri1.v0, tri1.v1, tri1.v2, obbMatrix);
+            obb.min = min(obb.min, tri1ObbBounds.min);
+            obb.max = max(obb.max, tri1ObbBounds.max);
+        }
+
+        if (Settings.maxPrimRangeSize > 2)
+        {
+            endOfRange = (pairDesc.PrimRangeStopBit() != 0);
+
+            if (endOfRange == false)
+            {
+                const uint trianglePairCount = header.TrianglePairCount();
+                if (currPairIdx == (trianglePairCount - 1))
+                {
+                    currNodeAddr += PRIMITIVE_STRUCT_SIZE_IN_BYTE;
+                    currPairIdx = 0;
+                }
+                else
+                {
+                    currPairIdx++;
+                }
+            }
+        }
+    } while (endOfRange == false);
+
+    return obb;
+}
+
+//=====================================================================================================================
 // This version of Post Proc Obbs assigns 8 threads per node and uses LDS to store the current node's
 // Kdop, 8 OBBs and the best obbMatrixIndex.
 void RefitOrientedBoundsImpl(
@@ -470,7 +530,7 @@ void RefitOrientedBoundsImpl(
 
     GroupMemoryBarrier();
 
-    const bool nodeMergingEnabled = (Settings.wideNodeMergingFlags & 0x1u) != 0;
+    const bool nodeMergingEnabled = (Settings.wideNodeMergingFlags & WIDE_NODE_MERGING_FLAG_ENABLE) != 0;
 
     bool done = false;
     uint iterations = 0;
@@ -485,6 +545,7 @@ void RefitOrientedBoundsImpl(
         uint parentIndex = 0;
         uint obbFlags = 0;
         float aabbSASum = 0.0f;
+        uint obbCandidates  = OBB_CANDIDATES_ALL_EMPTY; // (Best4) 4 x 8 bit candidate slots
 
         if (laneGroup.IsFirstLane())
         {
@@ -494,9 +555,13 @@ void RefitOrientedBoundsImpl(
             parentIndex = (parentAddr - offsets.internalNodes) / QBVH8::NodeSizeInBytes;
             exponentsChildIndexAndChildCount = DstBuffer.Load(nodeOffset + QUANTIZED_BVH8_NODE_OFFSET_EXP_CHILD_IDX_AND_VALID_COUNT);
 
-            const uint flagsOffset = ShaderConstants.offsets.qbvhObbFlags + (curNodeIndex * OBB_TABLE_ENTRY_SIZE);
+            const uint flagsOffset = ShaderConstants.offsets.qbvhObbFlags + (curNodeIndex * GetObbTableEntrySize());
             obbFlags = ScratchGlobal.Load<uint>(flagsOffset);
             aabbSASum = ScratchGlobal.Load<float>(flagsOffset + OBB_TABLE_SA_OFFSET);
+            if (IsObbBest4Enabled())
+            {
+                obbCandidates = ScratchGlobal.Load<uint>(flagsOffset + OBB_TABLE_CANDIDATES_OFFSET);
+            }
         }
 
         baseInternalNodeOffset = laneGroup.ReadFirstLane(baseInternalNodeOffset) << 3u;
@@ -505,6 +570,7 @@ void RefitOrientedBoundsImpl(
         exponentsChildIndexAndChildCount = laneGroup.ReadFirstLane(exponentsChildIndexAndChildCount);
         obbFlags = laneGroup.ReadFirstLane(obbFlags);
         aabbSASum = laneGroup.ReadFirstLane(aabbSASum);
+        obbCandidates = laneGroup.ReadFirstLane(obbCandidates);
 
         // Bit k of the mask is set when a block member's leaf segment starts at leaf k. A zero mask means this is
         // not a block node, which is handled below as a single member that owns every child.
@@ -586,6 +652,72 @@ void RefitOrientedBoundsImpl(
         }
 
         bestObbMatrixIndex = laneGroup.Broadcast(bestObbMatrixIndex, bestObbLaneIndex);
+
+        // (Best4) Try every candidate the encode stored (see OBB_ENABLE_FLAG_BEST4) and keep the one with the
+        // smallest sum of child OBB surface areas. Candidate 0 is bestObbMatrixIndex, so this never does worse by that
+        // measure. Leaf children are re-projected from their triangles, box children use their K-DOP as below.
+        if (IsObbBest4Enabled() &&
+            (((obbCandidates >> 8) & 0xffu) != OBB_CANDIDATE_EMPTY)) // a second candidate exists
+        {
+            // Matrix of this lane's box child, for slots that name a box child lane
+            uint laneBoxMatrix = INVALID_OBB;
+            if (isChildValid && (childIsLeaf == false))
+            {
+                laneBoxMatrix = ScratchGlobal.Load<uint>(childKdopOfs + OBBKDOP_OBBMATRIX_INDEX_OFFSET);
+            }
+
+            float bestCandidateSaSum = FLT_MAX;
+            uint  bestCandidate      = bestObbMatrixIndex;
+            uint  triedCandidates    = 0xffffffffu; // matrices already tried, 8 bits each
+            [loop]
+            for (uint k = 0; k < OBB_NUM_MATRIX_CANDIDATES; ++k)
+            {
+                const uint slot = (obbCandidates >> (8 * k)) & 0xffu; // same on all lanes
+                if (slot == OBB_CANDIDATE_EMPTY)
+                {
+                    continue;
+                }
+                uint candidate = slot & INVALID_OBB;
+                if ((slot & OBB_CANDIDATE_BOX_LANE_BIT) != 0)
+                {
+                    candidate = laneGroup.Broadcast(laneBoxMatrix, slot & 0x7u);
+                }
+
+                bool alreadyTried = (candidate == INVALID_OBB);
+                [unroll]
+                for (uint j = 0; j < OBB_NUM_MATRIX_CANDIDATES; ++j)
+                {
+                    alreadyTried = alreadyTried || ((j < k) && (((triedCandidates >> (8 * j)) & 0xffu) == candidate));
+                }
+                if (alreadyTried)
+                {
+                    continue;
+                }
+                triedCandidates = bitFieldInsert(triedCandidates, 8 * k, 8, candidate);
+
+                float childObbSa = 0.0f;
+                if (isChildValid)
+                {
+                    BoundingBox childObb;
+                    if (childIsLeaf)
+                    {
+                        childObb = ComputePrimNodeObbOnly(childNodeType, childNodeOffset, candidate);
+                    }
+                    else
+                    {
+                        childObb = ComputeBoxNodeOBB(childKdopOfs, candidate);
+                    }
+                    childObbSa = ComputeBoxSurfaceArea(childObb);
+                }
+                const float candidateSaSum = laneGroup.Sum(childObbSa);
+                if (candidateSaSum < bestCandidateSaSum) // ties keep the earlier candidate
+                {
+                    bestCandidateSaSum = candidateSaSum;
+                    bestCandidate      = candidate;
+                }
+            }
+            bestObbMatrixIndex = bestCandidate;
+        }
 
         // Walk the block members one at a time. Every member keeps the bounding box its parent saw before merging,
         // so it needs a K-DOP of its own, but only one of them is live at a time and the group shared K-DOP is
@@ -782,7 +914,7 @@ void RefitOrientedBoundsImpl(
             if (laneGroup.IsFirstLane())
             {
                 const uint parentFlagsOffset =
-                    ShaderConstants.offsets.qbvhObbFlags + parentIndex * OBB_TABLE_ENTRY_SIZE;
+                    ShaderConstants.offsets.qbvhObbFlags + parentIndex * GetObbTableEntrySize();
 
                 // numBoxChildren is already encoded as two's complement, so adding 1 actually
                 // decrements it:

@@ -37,6 +37,34 @@ bool IsObbEnabled()
 }
 
 //=====================================================================================================================
+// Best4 OBB matrices. See OBB_ENABLE_FLAG_BEST4.
+bool IsObbBest4Enabled()
+{
+    return (Settings.enableOrientedBoundingBoxes & OBB_ENABLE_FLAG_BEST4) != 0;
+}
+
+//=====================================================================================================================
+// Best4 on all nodes (only together with Best4).
+bool IsObbBest4AllNodes()
+{
+    return (Settings.enableOrientedBoundingBoxes & OBB_ENABLE_FLAG_BEST4_ALL_NODES) != 0;
+}
+
+//=====================================================================================================================
+// Whether the OBB table uses the 16 byte entry (Best4)
+bool IsObbTableExtended()
+{
+    return (Settings.enableOrientedBoundingBoxes & OBB_TABLE_EXTENDED_FLAGS) != 0;
+}
+
+//=====================================================================================================================
+// Size of one OBB table entry (qbvhObbFlags). Must match BvhBuilder::GetObbTableEntrySize().
+uint GetObbTableEntrySize()
+{
+    return IsObbTableExtended() ? OBB_TABLE_EXTENDED_ENTRY_SIZE : OBB_TABLE_ENTRY_SIZE;
+}
+
+//=====================================================================================================================
 // Map an index between 0-12 inclusive to an oriented bounding box axis.
 float3 OBBAxisIndexToFloat3(uint index)
 {

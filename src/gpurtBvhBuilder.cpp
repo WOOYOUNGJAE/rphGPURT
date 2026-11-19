@@ -405,6 +405,14 @@ uint32 BvhBuilder::GetMaxInternalNodeChildCount() const
 
 #if GPURT_BUILD_RTIP3_1
 // =====================================================================================================================
+// Size of one OBB table entry (qbvhObbFlags): 16 bytes with Best4, see rayTracingDefs.h.
+uint32 BvhBuilder::GetObbTableEntrySize() const
+{
+    return ((m_buildConfig.enableOrientedBoundingBoxes & OBB_TABLE_EXTENDED_FLAGS) != 0) ?
+        OBB_TABLE_EXTENDED_ENTRY_SIZE : OBB_TABLE_ENTRY_SIZE;
+}
+
+// =====================================================================================================================
 uint32 BvhBuilder::GetMaxObbSlotCount() const
 {
     const uint32 maxNumInternalNodes = GetNumInternalNodeCount();
@@ -1044,7 +1052,7 @@ BvhBuilder::ScratchBufferInfo BvhBuilder::CalculateScratchBufferInfo(
             // they need to be at the top of the scratch buffer to allow the rest to be re-used
             // for storing Kdops.
             runningOffset = Util::Pow2Align(runningOffset, CacheLineSize);
-            offsets.qbvhObbFlags = ReserveBytes(OBB_TABLE_ENTRY_SIZE * maxObbSlotCount, &runningOffset);
+            offsets.qbvhObbFlags = ReserveBytes(GetObbTableEntrySize() * maxObbSlotCount, &runningOffset);
 
             // Data beyond this point can be shared between the BVH build and OBB refit phase
             obbRefitBaseOffset = runningOffset;
@@ -1265,7 +1273,7 @@ BvhBuilder::ScratchBufferInfo BvhBuilder::CalculateScratchBufferInfoDefault(
             obbRefitStack = ReserveBytes(GetMaxLastLevelInternalNodeCount() * sizeof(uint), &runningOffset);
 
             // These flags contains the precomputed packed bits for OBB computation for each internal node
-            qbvhObbFlags = ReserveBytes(OBB_TABLE_ENTRY_SIZE * maxObbSlotCount, &runningOffset);
+            qbvhObbFlags = ReserveBytes(GetObbTableEntrySize() * maxObbSlotCount, &runningOffset);
             baseOffset4 = runningOffset;
 
             // Kdop storage space: we're trying to re-use as much of the scratch buffer as possible.
@@ -2076,6 +2084,29 @@ void BvhBuilder::InitBuildConfig(
     if ((m_buildConfig.shouldUseTrivialBuilder == false) && UseSingleThreadGroupBuild())
     {
         m_buildConfig.enableEarlyPairCompression = false;
+    }
+
+    // Best4 (also on all nodes) needs the BLAS OBB refit path, whose encode (EncodeHwBvh3_1, EncodeScratchBvh or
+    // CollapseAndEncodeScratchBvh) writes the 16 byte OBB table entry. Drop the bits elsewhere.
+    {
+        const bool usesSingleThreadGroupBuild =
+            (m_buildConfig.shouldUseTrivialBuilder == false) && UseSingleThreadGroupBuild();
+        // BLAS OBB build on the encode + BLAS OBB refit path (not parallel, not single thread group)
+        const bool usesBlasObbRefitPath =
+            (m_buildConfig.topLevelBuild == false) &&
+            Util::BitfieldIsSet(m_buildConfig.enableOrientedBoundingBoxes, uint32(AccelStructType::BottomLevel)) &&
+            (m_deviceSettings.enableParallelBuild == false) &&
+            (usesSingleThreadGroupBuild == false);
+
+        if (usesBlasObbRefitPath == false)
+        {
+            m_buildConfig.enableOrientedBoundingBoxes &= ~OBB_ENABLE_FLAG_BEST4;
+        }
+        // Best4 on all nodes only extends Best4
+        if ((m_buildConfig.enableOrientedBoundingBoxes & OBB_ENABLE_FLAG_BEST4) == 0)
+        {
+            m_buildConfig.enableOrientedBoundingBoxes &= ~OBB_ENABLE_FLAG_BEST4_ALL_NODES;
+        }
     }
 #endif
 
