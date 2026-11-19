@@ -36,6 +36,46 @@ bool IsObbEnabled()
     return (Settings.enableOrientedBoundingBoxes & bit(Settings.topLevelBuild ? TOP_LEVEL : BOTTOM_LEVEL)) != 0;
 }
 
+#if LOOSEN_DOBB
+//=====================================================================================================================
+// Loosen DOBB (deprecated, EnableOrientedBoundingBoxes 0x20). The builder keeps the bit only for merged BLAS builds
+// with BLAS OBBs.
+bool IsLoosenDobbEnabled()
+{
+    return (Settings.enableOrientedBoundingBoxes & OBB_ENABLE_FLAG_LOOSEN_DOBB) != 0;
+}
+#endif
+
+//=====================================================================================================================
+// Best of 4 OBB matrices (EnableOrientedBoundingBoxes 0x4): leaf-only nodes (merged leaf-only nodes when merging).
+// See OBB_ENABLE_FLAG_BEST_OF_4.
+bool IsObbBestOf4Enabled()
+{
+    return (Settings.enableOrientedBoundingBoxes & OBB_ENABLE_FLAG_BEST_OF_4) != 0;
+}
+
+//=====================================================================================================================
+// Best of 4 on every node up to the root (EnableOrientedBoundingBoxes 0x8, with 0x4; the builder drops it without
+// 0x4). See OBB_ENABLE_FLAG_BEST_OF_4.
+bool IsObbBestOf4AllNodes()
+{
+    return (Settings.enableOrientedBoundingBoxes & OBB_ENABLE_FLAG_BEST_OF_4_ALL_NODES) != 0;
+}
+
+//=====================================================================================================================
+// Whether the OBB table uses the 16 byte entry (best of 4, or Loosen DOBB when compiled in)
+bool IsObbTableExtended()
+{
+    return (Settings.enableOrientedBoundingBoxes & OBB_TABLE_EXTENDED_FLAGS) != 0;
+}
+
+//=====================================================================================================================
+// Size of one OBB table entry (qbvhObbFlags). Must match BvhBuilder::GetObbTableEntrySize().
+uint GetObbTableEntrySize()
+{
+    return IsObbTableExtended() ? OBB_TABLE_LOOSEN_ENTRY_SIZE : OBB_TABLE_ENTRY_SIZE;
+}
+
 //=====================================================================================================================
 // Map an index between 0-12 inclusive to an oriented bounding box axis.
 float3 OBBAxisIndexToFloat3(uint index)

@@ -261,13 +261,26 @@ static uint32 GetPrimCompressionFlags(
 {
     uint32 primCompressionFlags = 0;
 
-    if (primCompressionMode != PrimCompMode::Off)
+    const uint32 layout     = primCompressionMode & PrimCompMode::LayoutMask;
+    const uint32 searchMode = primCompressionMode & PrimCompMode::SearchModeMask;
+
+    if (layout != PrimCompMode::Off)
     {
         primCompressionFlags = PrimCompFlags::MultiPrim | PrimCompFlags::EnableTrailingZeroAndPrefix;
 
-        if (primCompressionMode != PrimCompMode::VariableLayout)
+        if (layout != PrimCompMode::VariableLayout)
         {
             primCompressionFlags |= PrimCompFlags::FixedLayout;
+        }
+
+        // Vertex search of the CompressPrims pass (mode 2 wins if both bits are set)
+        if (searchMode == PrimCompMode::SearchMode1)
+        {
+            primCompressionFlags |= PrimCompFlags::SearchMode1;
+        }
+        else if (searchMode != PrimCompMode::SearchMode0)
+        {
+            primCompressionFlags |= PrimCompFlags::SearchMode2;
         }
     }
 
@@ -404,6 +417,15 @@ uint32 BvhBuilder::GetMaxInternalNodeChildCount() const
 }
 
 #if GPURT_BUILD_RTIP3_1
+// =====================================================================================================================
+// Size of one OBB table entry (qbvhObbFlags). OBB matrix candidates (and Loosen DOBB when compiled in) store extra
+// per node data, see rayTracingDefs.h.
+uint32 BvhBuilder::GetObbTableEntrySize() const
+{
+    return ((m_buildConfig.enableOrientedBoundingBoxes & OBB_TABLE_EXTENDED_FLAGS) != 0) ?
+        OBB_TABLE_LOOSEN_ENTRY_SIZE : OBB_TABLE_ENTRY_SIZE;
+}
+
 // =====================================================================================================================
 uint32 BvhBuilder::GetMaxObbSlotCount() const
 {
@@ -1044,7 +1066,7 @@ BvhBuilder::ScratchBufferInfo BvhBuilder::CalculateScratchBufferInfo(
             // they need to be at the top of the scratch buffer to allow the rest to be re-used
             // for storing Kdops.
             runningOffset = Util::Pow2Align(runningOffset, CacheLineSize);
-            offsets.qbvhObbFlags = ReserveBytes(OBB_TABLE_ENTRY_SIZE * maxObbSlotCount, &runningOffset);
+            offsets.qbvhObbFlags = ReserveBytes(GetObbTableEntrySize() * maxObbSlotCount, &runningOffset);
 
             // Data beyond this point can be shared between the BVH build and OBB refit phase
             obbRefitBaseOffset = runningOffset;
@@ -1266,7 +1288,7 @@ BvhBuilder::ScratchBufferInfo BvhBuilder::CalculateScratchBufferInfoDefault(
             obbRefitStack = ReserveBytes(GetMaxLastLevelInternalNodeCount() * sizeof(uint), &runningOffset);
 
             // These flags contains the precomputed packed bits for OBB computation for each internal node
-            qbvhObbFlags = ReserveBytes(OBB_TABLE_ENTRY_SIZE * maxObbSlotCount, &runningOffset);
+            qbvhObbFlags = ReserveBytes(GetObbTableEntrySize() * maxObbSlotCount, &runningOffset);
             baseOffset4 = runningOffset;
 
             // Kdop storage space: we're trying to re-use as much of the scratch buffer as possible.
@@ -2084,6 +2106,40 @@ void BvhBuilder::InitBuildConfig(
     if ((m_buildConfig.shouldUseTrivialBuilder == false) && UseSingleThreadGroupBuild())
     {
         m_buildConfig.enableEarlyPairCompression = false;
+    }
+
+    // Best of 4 (EnableOrientedBoundingBoxes 0x4) exists in the merged BLAS path (EncodeScratchBvh or
+    // CollapseAndEncodeScratchBvh, then RefitOrientedBounds) and in the non-merged one (EncodeHwBvh3_1 or
+    // CollapseAndEncodeScratchBvh without merging, then RefitOrientedBounds). The shaders pick its candidates by
+    // whether the build merges. Loosen DOBB (0x20, when LOOSEN_DOBB is 1) only exists in the merged path.
+    // Every other path keeps the 8 byte OBB table entry, so drop the bits there.
+    {
+        const bool usesSingleThreadGroupBuild =
+            (m_buildConfig.shouldUseTrivialBuilder == false) && UseSingleThreadGroupBuild();
+        // BLAS build that goes through EncodeScratchBvh or CollapseAndEncodeScratchBvh (merging) or EncodeHwBvh3_1
+        // (no merging), then the BLAS refit
+        const bool usesBlasObbRefitPath =
+            (m_buildConfig.topLevelBuild == false) &&
+            Util::BitfieldIsSet(m_buildConfig.enableOrientedBoundingBoxes, uint32(AccelStructType::BottomLevel)) &&
+            (m_deviceSettings.enableParallelBuild == false) &&
+            (usesSingleThreadGroupBuild == false);
+
+#if LOOSEN_DOBB
+        // Loosen DOBB needs merging
+        if ((usesBlasObbRefitPath == false) || (m_buildConfig.enableWideNodeMerging == false))
+        {
+            m_buildConfig.enableOrientedBoundingBoxes &= ~OBB_ENABLE_FLAG_LOOSEN_DOBB;
+        }
+#endif
+        if (usesBlasObbRefitPath == false)
+        {
+            m_buildConfig.enableOrientedBoundingBoxes &= ~OBB_ENABLE_FLAG_BEST_OF_4;
+        }
+        // Best of 4 on all nodes (0x8) only extends Best of 4 (0x4)
+        if ((m_buildConfig.enableOrientedBoundingBoxes & OBB_ENABLE_FLAG_BEST_OF_4) == 0)
+        {
+            m_buildConfig.enableOrientedBoundingBoxes &= ~OBB_ENABLE_FLAG_BEST_OF_4_ALL_NODES;
+        }
     }
 #endif
 
@@ -3002,12 +3058,13 @@ void BvhBuilder::InitBuildSettings()
 #endif
     m_buildSettings.boxSplittingFlags            = m_deviceSettings.boxSplittingFlags;
     // Normalized for the shaders (WIDE_NODE_MERGING_FLAG_*): 0 for builds that do not merge, so they run the same shader
-    // code as without merging. Merging builds get ENABLE, plus LEGACY_TWO_PASS for the two pass merge.
+    // code as without merging. Merging builds get ENABLE, plus LEGACY_TWO_PASS for the two pass merge, plus MinNodePack.
     // The ENABLE-only form makes the BVH2 build store wide leaf counts and CollapseAndEncodeScratchBvh merge.
     m_buildSettings.wideNodeMergingFlags = 0;
     if (m_buildConfig.enableWideNodeMerging)
     {
-        m_buildSettings.wideNodeMergingFlags = static_cast<uint32>(GpuRt::WideNodeMergingFlags::Enable);
+        m_buildSettings.wideNodeMergingFlags = static_cast<uint32>(GpuRt::WideNodeMergingFlags::Enable) |
+            (m_deviceSettings.wideNodeMergingFlags & static_cast<uint32>(GpuRt::WideNodeMergingFlags::MinNodePack));
         if (m_buildConfig.enableTwoPassWideNodeMerging)
         {
             m_buildSettings.wideNodeMergingFlags |= static_cast<uint32>(GpuRt::WideNodeMergingFlags::LegacyTwoPass);
@@ -4832,7 +4889,12 @@ void BvhBuilder::EncodeScratchBvh()
     {
        .numThreads = numThreadGroups * DefaultThreadGroupSize
     };
+#if GPURT_BUILD_RTIP3_1
+    // Merge packing (WideNodeMergingFlags::MinNodePack) reads its LUT from the OBB LUT buffer.
+    WriteBuildBufferBindings(shaderConstants, BuildBufferBindingFlags::ObbLut);
+#else
     WriteBuildBufferBindings(shaderConstants);
+#endif
 
     INTERNAL_TIMESTAMP_BEGIN();
 
@@ -4859,6 +4921,7 @@ void BvhBuilder::CollapseAndEncodeScratchBvh()
        .numThreads = numThreadGroups * DefaultThreadGroupSize
     };
 #if GPURT_BUILD_RTIP3_1
+    // Merge packing (WideNodeMergingFlags::MinNodePack) reads its LUT from the OBB LUT buffer.
     WriteBuildBufferBindings(shaderConstants, BuildBufferBindingFlags::ObbLut);
 #else
     WriteBuildBufferBindings(shaderConstants);
@@ -5676,9 +5739,11 @@ uint32 BvhBuilder::WriteBuildBufferBindings(
     entryOffset = WriteBuildShaderConstantBuffer(entryOffset);
 
 #if GPURT_BUILD_RTIP3_1
-    // Obb Lut Constants
+    // Obb Lut Constants (also holds the min-node merge packing LUT, WideNodeMergingFlags::MinNodePack)
+    const bool useMergePackLut = (m_deviceSettings.wideNodeMergingFlags &
+                                  static_cast<uint32>(GpuRt::WideNodeMergingFlags::MinNodePack)) != 0;
     if ((buildBufferBindingFlags & BuildBufferBindingFlags::ObbLut) &&
-        (m_deviceSettings.enableOrientedBoundingBoxes != 0) ||
+        ((m_deviceSettings.enableOrientedBoundingBoxes != 0) || useMergePackLut) ||
         (m_deviceSettings.tlasRefittingMode != TlasRefittingMode::Disabled))
     {
         entryOffset = WriteBufferVa(m_pDevice->GetLutVa(), entryOffset);

@@ -26,6 +26,14 @@
 #define _ENCODE_SCRATCH_BVH_HLSL
 #define USE_LDS_CHILDREN 1 // this is default setting
 #define FOLLOWER_STACK_ENTRY 0xFFFFFFFE
+
+// LDS bank conflict case study toggle.
+//   0: (default) lane-group children share SharedMem with TaskMacros.hlsl, packed per lane group (conflict-free).
+//   1: repro of the original mistake - SharedMem was overlooked and the children got a second LDS buffer with a
+//      per-thread layout, which makes every lane group of a wave hit the same LDS banks.
+#ifndef LDS_BANK_CONFLICT_REPRO
+#define LDS_BANK_CONFLICT_REPRO 0
+#endif
 //=====================================================================================================================
 #include "../../shadersClean/common/ShaderDefs.hlsli"
 
@@ -49,6 +57,9 @@ T LoadInstanceDescBuffer(uint offset)
 #define LANE_GROUP_SIZE 8
 #define MAX_ELEMENTS_PER_THREAD 8
 #define MAX_LDS_ELEMENTS_PER_THREADGROUP (MAX_ELEMENTS_PER_THREAD * BUILD_THREADGROUP_SIZE)
+// NOTE: SharedMem is also required by TaskMacros.hlsl: INIT_TASK/END_TASK broadcast the task index through
+// SharedMem[0]. The lane-group children below reuse this buffer; the group barriers in END_TASK keep the two uses
+// apart in time.
 groupshared uint SharedMem[MAX_LDS_ELEMENTS_PER_THREADGROUP];
 uint GetSharedMem(uint index)
 {
@@ -59,6 +70,23 @@ void SetSharedMem(uint index, uint value)
     SharedMem[index] = value;
 }
 
+#if LDS_BANK_CONFLICT_REPRO
+// [Repro] SharedMem is only referenced inside the task macros, so it was overlooked and a second buffer was added for
+// the lane-group children. It follows the per-thread node array convention of EncodeHwBvh3_1
+// (GetNodeArrayBaseInLds(ReadFirstLane(localId), 8)): a lane group uses the row of its first lane.
+// The rows of two neighbouring first lanes are 8 * 8 = 64 DWORDs (256 bytes) apart, so the same child slot of every
+// lane group in a wave maps to the same LDS bank (4-way conflict per 32 lanes, with either 32 or 64 banks).
+groupshared uint SharedChildrenPerThread[BUILD_THREADGROUP_SIZE][MAX_ELEMENTS_PER_THREAD];
+
+uint GetSharedChildren(uint laneGroupIndex, uint childIndex)
+{
+    return SharedChildrenPerThread[laneGroupIndex * LANE_GROUP_SIZE][childIndex];
+}
+void SetSharedChildren(uint laneGroupIndex, uint childIndex, uint value)
+{
+    SharedChildrenPerThread[laneGroupIndex * LANE_GROUP_SIZE][childIndex] = value;
+}
+#else
 uint GetSharedChildren(uint laneGroupIndex, uint childIndex)
 {
     return SharedMem[laneGroupIndex * LANE_GROUP_SIZE + childIndex];
@@ -67,6 +95,7 @@ void SetSharedChildren(uint laneGroupIndex, uint childIndex, uint value)
 {
     SharedMem[laneGroupIndex * LANE_GROUP_SIZE + childIndex] = value;
 }
+#endif
 
 #include "../../shadersClean/build/BuildCommonScratch.hlsli"
 
@@ -200,7 +229,12 @@ static void EncodeCompressedBoxNode(
     [unroll]
     for (uint i = localId; i < MAX_LDS_ELEMENTS_PER_THREADGROUP; i += BUILD_THREADGROUP_SIZE)
     {
+#if LDS_BANK_CONFLICT_REPRO
+        // Same linear (conflict-free) clear as below, just on the separate buffer.
+        SharedChildrenPerThread[i / MAX_ELEMENTS_PER_THREAD][i % MAX_ELEMENTS_PER_THREAD] = INVALID_IDX;
+#else
         SetSharedMem(i, INVALID_IDX);
+#endif
     }
     GroupMemoryBarrier();
 #else
@@ -260,11 +294,25 @@ static void EncodeCompressedBoxNode(
 
     uint boxOrLeafChildIndex = childIsBox ? laneGroup.laneIndex : laneGroup.laneIndex - numBoxChildren;
 
+    // 그룹이 시작되는 슬롯 mask (MergeLeafOnlyBoxNodes가 이 슬롯에서 merge를 끊는다). 0이면 기존과 동일
+    uint forcedGroupStartMask = 0;
+
+    // (최소 노드 묶기, WideNodeMergingFlags 0x10) LUT 순서로 box child 노드 내용을 옮겨, 연속 merge가
+    // 노드를 가장 적게 남기게 한다.
+    if ((Settings.wideNodeMergingFlags & WIDE_NODE_MERGING_FLAG_MIN_NODE_PACK) != 0)
+    {
+        forcedGroupStartMask = PackLeafOnlyMergeGroups(laneGroup,
+                                                       scratchWideNodesScratchOffset,
+                                                       childWideScratchIndex,
+                                                       childIsBox);
+    }
+
     bool isFollower = MergeLeafOnlyBoxNodes(laneGroup,
                                             laneGroupIndex,
                                             scratchWideNodesScratchOffset,
                                             childWideScratchIndex,
-                                            childIsBox);
+                                            childIsBox,
+                                            forcedGroupStartMask);
     const bool isLeaderBoxChild   = childIsBox && !isFollower;
     const bool isFollowerBoxChild = childIsBox && isFollower;
 
@@ -450,8 +498,48 @@ static void EncodeCompressedBoxNode(
         const float aabbMax = laneGroup.Max(aabbSa);
         const uint aabbMaxChildIdx = laneGroup.GetFirstActiveLaneIndex(aabbSa == aabbMax);
 
+        // (Loosen DOBB, EnableOrientedBoundingBoxes 0x4) The OBB orientation comes from the child with the largest
+        // surface area. A merged block is one node and one visit for all its members, and is likely hit anyway, so
+        // its surface area is split over its members: a child outside any block can then win over a block. A block
+        // whose surface area is large enough to stay the largest even after the split is still picked.
+        // The refit checks the OBB against the AABBs with the same split surface areas.
+        // Without LOOSEN_DOBB the loosened values below stay equal to the original ones.
+        uint  loosenObbChildIdx = aabbMaxChildIdx; // child whose orientation this node uses
+        float loosenAabbSum     = aabbSum;         // AABB surface area sum the refit compares the OBB against
+#if LOOSEN_DOBB
+        if (IsLoosenDobbEnabled())
+        {
+            uint numBlockMembers = 1;
+            if (childIsBox)
+            {
+                // A block runs from its leader up to the next child that is not a follower. Lane 0 is always a leader.
+                const uint notFollowerMask = ~followerBoxMask & bits(LANE_GROUP_SIZE);
+                const uint laneAndBelow    = bits(laneGroup.laneIndex + 1);
+                const uint blockLeaderLane = firstbithigh(notFollowerMask & laneAndBelow);
+                const uint nextLeaderLane  = firstbitlow((notFollowerMask | (1u << LANE_GROUP_SIZE)) & ~laneAndBelow);
+                numBlockMembers = nextLeaderLane - blockLeaderLane;
+                GPU_ASSERT(numBlockMembers > 0);
+            }
+
+            const float loosenSa  = aabbSa / float(numBlockMembers);
+            const float loosenMax = laneGroup.Max(loosenSa);
+            loosenAabbSum     = laneGroup.Sum(loosenSa);
+            loosenObbChildIdx = laneGroup.GetFirstActiveLaneIndex(loosenSa == loosenMax);
+        }
+#endif
+
+        // (Best of 4, EnableOrientedBoundingBoxes 0x4, merging) merged leaf-only node only: every leaf's matrix is
+        // needed to collect the candidates below. numBoxChildren and the follower count are the same on all lanes.
+        const bool collectObbCandidates = IsObbBestOf4Enabled() && (numBoxChildren == 0) &&
+                                          (bitFieldExtract(parentWideNodePackedFlags, 17, 3) != 0);
+        // (Best of 4 on all nodes, EnableOrientedBoundingBoxes 0x8) every other node up to the root: the 4 largest children, as without
+        // merging. Every leaf's matrix is needed for the candidates below.
+        const bool collectChildObbCandidates = IsObbBestOf4Enabled() && IsObbBestOf4AllNodes() &&
+                                               (collectObbCandidates == false);
+
         uint bestObbMatrixIdx = INVALID_OBB;
-        if ((aabbMaxChildIdx == laneGroup.laneIndex) && (childIsLeaf))
+        if (((aabbMaxChildIdx == laneGroup.laneIndex) || (loosenObbChildIdx == laneGroup.laneIndex) ||
+             collectObbCandidates || collectChildObbCandidates) && (childIsLeaf))
         {
             uint packedFlags = childScratchNode.packedFlags;
 
@@ -484,7 +572,64 @@ static void EncodeCompressedBoxNode(
             bestObbMatrixIdx = ExtractScratchNodeObbMatrixIdx(packedFlags);
         }
 
+        const uint leafObbMatrixIdx = bestObbMatrixIdx; // this lane's leaf matrix (when computed above)
+
+        // Leaf matrix of the loosened best child (same as the original one when Loosen DOBB is off)
+        const uint loosenObbMatrixIdx = laneGroup.Broadcast(bestObbMatrixIdx, loosenObbChildIdx);
         bestObbMatrixIdx = laneGroup.Broadcast(bestObbMatrixIdx, aabbMaxChildIdx);
+
+        // OBB matrix candidates, 8 bits per slot (see OBB_TABLE_CANDIDATES_OFFSET). Candidate 0 is always the matrix
+        // the node uses today, so the refit's choice is never worse by its measure. The refit tries every candidate
+        // and keeps the one with the smallest sum of child OBB surface areas.
+        uint obbCandidates = OBB_CANDIDATES_ALL_EMPTY;
+        if (collectObbCandidates)
+        {
+            // Merged leaf-only node: matrices of the next largest leaves, skipping ones already in the list
+            obbCandidates = bitFieldInsert(obbCandidates, 0, 8, loosenObbMatrixIdx);
+
+            bool isUnlisted = childIsLeaf && (leafObbMatrixIdx != INVALID_OBB) && (leafObbMatrixIdx != loosenObbMatrixIdx);
+            [unroll]
+            for (uint k = 1; k < OBB_NUM_MATRIX_CANDIDATES; ++k)
+            {
+                const float unlistedSa  = isUnlisted ? aabbSa : -1.0f;
+                const float unlistedMax = laneGroup.Max(unlistedSa);
+                if (unlistedMax >= 0.0f) // same on all lanes
+                {
+                    const uint lane   = laneGroup.GetFirstActiveLaneIndex(isUnlisted && (unlistedSa == unlistedMax));
+                    const uint matrix = laneGroup.Broadcast(leafObbMatrixIdx, lane);
+                    obbCandidates = bitFieldInsert(obbCandidates, 8 * k, 8, matrix);
+                    isUnlisted    = isUnlisted && (leafObbMatrixIdx != matrix);
+                }
+            }
+        }
+        else if (collectChildObbCandidates)
+        {
+            // (Best of 4 on all nodes, EnableOrientedBoundingBoxes 0x8) as in EncodeHwBvh3_1: candidate 0 is the current choice, then the
+            // next largest children. A box child's slot names its lane (= refit lane), since its matrix is only known
+            // after its own refit.
+            const uint laneSlot = childIsLeaf ? leafObbMatrixIdx : (OBB_CANDIDATE_BOX_LANE_BIT | laneGroup.laneIndex);
+            obbCandidates = bitFieldInsert(obbCandidates, 0, 8, laneGroup.Broadcast(laneSlot, loosenObbChildIdx));
+
+            // The members of a merged block get the same matrix from the refit, so a block takes one candidate.
+            // childBlock is the lane of the block leader, and the lane itself for every other child.
+            const uint childBlock = firstbithigh(~followerBoxMask & bits(laneGroup.laneIndex + 1));
+
+            bool isUnpicked = (childIsLeaf || childIsBox) &&
+                              (childBlock != laneGroup.Broadcast(childBlock, loosenObbChildIdx)) &&
+                              (laneSlot != OBB_CANDIDATE_EMPTY);
+            [unroll]
+            for (uint k = 1; k < OBB_NUM_MATRIX_CANDIDATES; ++k)
+            {
+                const float unpickedSa  = isUnpicked ? aabbSa : -1.0f;
+                const float unpickedMax = laneGroup.Max(unpickedSa);
+                if (unpickedMax >= 0.0f) // same on all lanes
+                {
+                    const uint lane = laneGroup.GetFirstActiveLaneIndex(isUnpicked && (unpickedSa == unpickedMax));
+                    obbCandidates = bitFieldInsert(obbCandidates, 8 * k, 8, laneGroup.Broadcast(laneSlot, lane));
+                    isUnpicked    = isUnpicked && (childBlock != laneGroup.Broadcast(childBlock, lane));
+                }
+            }
+        }
 
         if (laneGroup.IsFirstLane())
         {
@@ -539,13 +684,32 @@ static void EncodeCompressedBoxNode(
             // b[22:24] : Child index with maximum AABB surface area for this node.
             // b[25:31] : OBB matrix index of the best leaf node amongst the children. This is precomputed and stored in
             //           scratch node during morton code generation phase to absorb the VGPR impact of that computation.
-            const uint encodedBits = (bestObbMatrixIdx << OBB_FLAGS_BIT_OFFSET_OBB_MATRIX_INDEX) |
-                                     (aabbMaxChildIdx  << OBB_FLAGS_BIT_OFFSET_AABB_MAX_CHILD_INDEX) |
-                                     (leafStartMask    << OBB_FLAGS_BIT_OFFSET_LEAF_START_MASK) |
-                                     ((numLeaderBoxChildren ^ 0xFu) + 1);
+            if (IsObbTableExtended())
+            {
+                // Loosened best child and split surface area sum in the regular fields, the original best child
+                // (whose orientation goes to the parent) and the matrix candidates in the extra fields.
+                // Without Loosen DOBB the loosened values equal the original ones. See OBB_TABLE_LOOSEN_ENTRY_SIZE.
+                const uint encodedBits = (loosenObbMatrixIdx << OBB_FLAGS_BIT_OFFSET_OBB_MATRIX_INDEX) |
+                                         (loosenObbChildIdx  << OBB_FLAGS_BIT_OFFSET_AABB_MAX_CHILD_INDEX) |
+                                         (leafStartMask      << OBB_FLAGS_BIT_OFFSET_LEAF_START_MASK) |
+                                         ((numLeaderBoxChildren ^ 0xFu) + 1);
+                const uint origBest = (bestObbMatrixIdx << 3) | aabbMaxChildIdx;
 
-            const uint obbFlagsOffset = ShaderConstants.offsets.qbvhObbFlags + (bvhNodeDstIdx * OBB_TABLE_ENTRY_SIZE);
-            ScratchGlobal.Store<uint2>(obbFlagsOffset, uint2(encodedBits, asuint(aabbSum)));
+                const uint obbFlagsOffset =
+                    ShaderConstants.offsets.qbvhObbFlags + (bvhNodeDstIdx * OBB_TABLE_LOOSEN_ENTRY_SIZE);
+                ScratchGlobal.Store<uint4>(obbFlagsOffset,
+                                           uint4(encodedBits, asuint(loosenAabbSum), origBest, obbCandidates));
+            }
+            else
+            {
+                const uint encodedBits = (bestObbMatrixIdx << OBB_FLAGS_BIT_OFFSET_OBB_MATRIX_INDEX) |
+                                         (aabbMaxChildIdx  << OBB_FLAGS_BIT_OFFSET_AABB_MAX_CHILD_INDEX) |
+                                         (leafStartMask    << OBB_FLAGS_BIT_OFFSET_LEAF_START_MASK) |
+                                         ((numLeaderBoxChildren ^ 0xFu) + 1);
+
+                const uint obbFlagsOffset = ShaderConstants.offsets.qbvhObbFlags + (bvhNodeDstIdx * OBB_TABLE_ENTRY_SIZE);
+                ScratchGlobal.Store<uint2>(obbFlagsOffset, uint2(encodedBits, asuint(aabbSum)));
+            }
         }
     }
 
@@ -616,7 +780,15 @@ void EncodeScratchBvhImpl(
     {
         if (globalId < numScratchWideNodes)
         {
-            ScratchGlobal.Store<uint2>(ShaderConstants.offsets.qbvhObbFlags + globalId * OBB_TABLE_ENTRY_SIZE, 0);
+            if (IsObbTableExtended())
+            {
+                ScratchGlobal.Store<uint4>(
+                    ShaderConstants.offsets.qbvhObbFlags + globalId * OBB_TABLE_LOOSEN_ENTRY_SIZE, 0);
+            }
+            else
+            {
+                ScratchGlobal.Store<uint2>(ShaderConstants.offsets.qbvhObbFlags + globalId * OBB_TABLE_ENTRY_SIZE, 0);
+            }
         }
     }
     if (globalId == 0)
@@ -829,4 +1001,5 @@ void EncodeScratchBvh(
 
 #undef USE_LDS_CHILDREN
 #undef FOLLOWER_STACK_ENTRY
+#undef LDS_BANK_CONFLICT_REPRO
 #endif

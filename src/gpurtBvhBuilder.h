@@ -583,6 +583,7 @@ private:
     uint32 GetMaxLastLevelInternalNodeCount() const;
 #if GPURT_BUILD_RTIP3_1
     uint32 GetMaxObbSlotCount() const;
+    uint32 GetObbTableEntrySize() const;
     void   InitTlasRefit();
 #endif
 

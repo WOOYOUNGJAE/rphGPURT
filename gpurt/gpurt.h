@@ -1187,6 +1187,8 @@ enum class WideNodeMergingFlags : uint32
     LegacyTwoPass = 0x2,  // BLAS merging in two passes (CollapseScratchBvh + EncodeScratchBvh, ScratchWideNode).
                           // Turns merging on by itself, and wins over Enable (3 = two pass).
     // 0x4, 0x8: unused
+    MinNodePack   = 0x10, // Reorder sibling leaf-only boxes so merging gives the fewest nodes (pack LUT in ObbData).
+                          // Used with Enable or LegacyTwoPass (17 = one pass, 18 = two pass).
 };
 
 // Ray history trace

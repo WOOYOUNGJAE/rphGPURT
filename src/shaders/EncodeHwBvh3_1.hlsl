@@ -1296,8 +1296,14 @@ static void EncodeCompressedBoxNode(
         const uint childSlot       = isLeaf ? (boxOrLeafChildIndex + numBoxChildren) : boxOrLeafChildIndex;
         const uint aabbMaxChildIdx = laneGroup.Broadcast(childSlot, aabbMaxLane);
 
+        // (Best of 4, EnableOrientedBoundingBoxes 0x4, no merging) leaf-only nodes, and every node with 0x8: the 4
+        // largest children. Every leaf's matrix is needed for the candidates below. numBoxChildren is the same on all
+        // lanes.
+        const bool collectChildObbCandidates =
+            IsObbBestOf4Enabled() && (IsObbBestOf4AllNodes() || (numBoxChildren == 0));
+
         uint bestObbMatrixIdx = INVALID_OBB;
-        if ((aabbMaxLane == laneGroup.laneIndex) && (isLeaf))
+        if (((aabbMaxLane == laneGroup.laneIndex) || collectChildObbCandidates) && (isLeaf))
         {
             uint packedFlags = scratchNode.packedFlags;
 
@@ -1330,7 +1336,33 @@ static void EncodeCompressedBoxNode(
             bestObbMatrixIdx = ExtractScratchNodeObbMatrixIdx(packedFlags);
         }
 
+        const uint leafObbMatrixIdx = bestObbMatrixIdx; // this lane's leaf matrix (when computed above)
         bestObbMatrixIdx = laneGroup.Broadcast(bestObbMatrixIdx, aabbMaxLane);
+
+        // (Best of 4, no merging) candidate 0 is the current choice, then the next largest children. A box child's
+        // slot names its child slot index (= refit lane), since its matrix is only known after its own refit. Here
+        // lanes are not child slots, so the slot index is used, not the lane.
+        uint obbCandidates = OBB_CANDIDATES_ALL_EMPTY;
+        if (collectChildObbCandidates)
+        {
+            const uint laneSlot = isLeaf ? leafObbMatrixIdx : (OBB_CANDIDATE_BOX_LANE_BIT | childSlot);
+            obbCandidates = bitFieldInsert(obbCandidates, 0, 8, laneGroup.Broadcast(laneSlot, aabbMaxLane));
+
+            bool isUnpicked = (isLeaf || isBox) && (laneGroup.laneIndex != aabbMaxLane) &&
+                              (laneSlot != OBB_CANDIDATE_EMPTY);
+            [unroll]
+            for (uint k = 1; k < OBB_NUM_MATRIX_CANDIDATES; ++k)
+            {
+                const float unpickedSa  = isUnpicked ? aabbSa : -1.0f;
+                const float unpickedMax = laneGroup.Max(unpickedSa);
+                if (unpickedMax >= 0.0f) // same on all lanes
+                {
+                    const uint lane = laneGroup.GetFirstActiveLaneIndex(isUnpicked && (unpickedSa == unpickedMax));
+                    obbCandidates = bitFieldInsert(obbCandidates, 8 * k, 8, laneGroup.Broadcast(laneSlot, lane));
+                    isUnpicked    = isUnpicked && (laneGroup.laneIndex != lane);
+                }
+            }
+        }
 
         if (laneGroup.IsFirstLane())
         {
@@ -1358,8 +1390,20 @@ static void EncodeCompressedBoxNode(
                                      (aabbMaxChildIdx  << 22u) |
                                      ((numBoxChildren ^ 0xFu) + 1);
 
-            const uint obbFlagsOffset = ShaderConstants.offsets.qbvhObbFlags + (bvhNodeDstIdx * OBB_TABLE_ENTRY_SIZE);
-            ScratchGlobal.Store<uint2>(obbFlagsOffset, uint2(encodedBits, asuint(aabbSum)));
+            if (IsObbTableExtended())
+            {
+                // 16 byte entry (see OBB_TABLE_LOOSEN_ENTRY_SIZE). Only the candidates are used on this path;
+                // the original best field is filled the same way as EncodeScratchBvh for consistency.
+                const uint origBest = (bestObbMatrixIdx << 3) | aabbMaxChildIdx;
+                const uint obbFlagsOffset =
+                    ShaderConstants.offsets.qbvhObbFlags + (bvhNodeDstIdx * OBB_TABLE_LOOSEN_ENTRY_SIZE);
+                ScratchGlobal.Store<uint4>(obbFlagsOffset, uint4(encodedBits, asuint(aabbSum), origBest, obbCandidates));
+            }
+            else
+            {
+                const uint obbFlagsOffset = ShaderConstants.offsets.qbvhObbFlags + (bvhNodeDstIdx * OBB_TABLE_ENTRY_SIZE);
+                ScratchGlobal.Store<uint2>(obbFlagsOffset, uint2(encodedBits, asuint(aabbSum)));
+            }
         }
     }
 
@@ -1476,7 +1520,14 @@ void EncodeHwBvhImpl(
     {
         if (globalId < maxNumInternalNodes)
         {
-            ScratchGlobal.Store<uint2>(ShaderConstants.offsets.qbvhObbFlags + globalId * OBB_TABLE_ENTRY_SIZE, 0);
+            if (IsObbTableExtended())
+            {
+                ScratchGlobal.Store<uint4>(ShaderConstants.offsets.qbvhObbFlags + globalId * OBB_TABLE_LOOSEN_ENTRY_SIZE, 0);
+            }
+            else
+            {
+                ScratchGlobal.Store<uint2>(ShaderConstants.offsets.qbvhObbFlags + globalId * OBB_TABLE_ENTRY_SIZE, 0);
+            }
         }
     }
 
@@ -1705,7 +1756,31 @@ void EncodeHwBvh3_1(
         }
     }
 
+#if SOGANG_EXPERIMENT && GPURT_ENABLE_GPU_DEBUG
+    if (globalId == 0)
+    {
+        uint numPrims = DstBuffer.Load(ACCEL_STRUCT_HEADER_NUM_PRIMS_OFFSET);
+        uint numActivePrims = DstBuffer.Load(ACCEL_STRUCT_HEADER_NUM_ACTIVE_PRIMS_OFFSET);
+        uint numDescs = DstBuffer.Load(ACCEL_STRUCT_HEADER_NUM_DESCS_OFFSET);
+        uint numInternal32Nodes = DstBuffer.Load(ACCEL_STRUCT_HEADER_NUM_INTERNAL_FP32_NODES_OFFSET);
+        uint numInternal16Nodes = DstBuffer.Load(ACCEL_STRUCT_HEADER_NUM_INTERNAL_FP16_NODES_OFFSET);
+        uint numLeafNodes = DstBuffer.Load(ACCEL_STRUCT_HEADER_NUM_LEAF_NODES_OFFSET);
+
+        // uint numMergedCounts[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+        // for (uint i = 0; i < 8; i++)
+        // {
+        //     numMergedCounts[i] = ScratchGlobal.Load(ShaderConstants.offsets.sgDebugCounters + i * sizeof(uint));
+        // }
+        // GPU_DPF("mergedCounts= %u, %u, %u, %u, %u, %u, %u, %u",
+        //         numMergedCounts[0], numMergedCounts[1], numMergedCounts[2], numMergedCounts[3],
+        //         numMergedCounts[4], numMergedCounts[5], numMergedCounts[6], numMergedCounts[7]);
+        GPU_DPF("numPrims= %u, numActivePrims= %u, numInternal32Nodes= %u, numLeafNodes= %u",
+                numPrims, numActivePrims, numInternal32Nodes, numLeafNodes);            
+    }
+    END_TASK(1);
+#else
     END_TASK_NO_WAIT(1);
+#endif
 
 #endif
 }

@@ -755,9 +755,18 @@ Pal::Result Device::Init()
         }
     }
 
+    // The min-node merge packing LUT (WideNodeMergingFlags::MinNodePack) lives in the same buffer, so upload it
+    // even when OBBs and TLAS refitting are off.
+    const bool useMergePackLut = (m_info.deviceSettings.wideNodeMergingFlags &
+                                  static_cast<uint32>(GpuRt::WideNodeMergingFlags::MinNodePack)) != 0;
+
     if ((m_info.deviceSettings.tlasRefittingMode != TlasRefittingMode::Disabled) ||
-        (m_info.deviceSettings.enableOrientedBoundingBoxes != 0))
+        (m_info.deviceSettings.enableOrientedBoundingBoxes != 0) ||
+        useMergePackLut)
     {
+        // The whole source struct is copied into the shader's ObbData constant buffer.
+        static_assert(sizeof(ObbDataSource) == sizeof(ObbData), "ObbDataSource and ObbData layouts must match");
+
         ClientGpuMemHandle pGpuMemA = nullptr;
         ClientGpuMemHandle pGpuMemB = nullptr;
 
@@ -822,6 +831,12 @@ Pal::Result Device::Init()
         {
             m_clientCb.pfnFreeGpuMem(m_info, pGpuMemB);
         }
+    }
+
+    // Without the LUT the merge packing shader path would read address 0.
+    if (m_lutGpuVa == 0)
+    {
+        m_info.deviceSettings.wideNodeMergingFlags &= ~static_cast<uint32>(GpuRt::WideNodeMergingFlags::MinNodePack);
     }
 #endif
 

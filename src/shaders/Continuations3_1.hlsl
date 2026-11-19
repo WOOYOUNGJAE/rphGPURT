@@ -211,6 +211,7 @@ static void TraversalInternal3_1(
             const uint nodePtr = nextNodePtr;
 
             const float rayExtent = (lastNodePtr == INVALID_NODE) ? committed.rayTCurrent : tMax;
+            // const float rayExtent = tMax;
 
             // Perform ray-bvh node intersection
             Bvh8IntersectResult result =

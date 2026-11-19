@@ -42,12 +42,20 @@ typedef uint64_t uint64;
 #endif
 
 #if GPURT_BUILD_RTIP3_1
-// Values of DeviceSettings::primCompressionFlags
+// Values of DeviceSettings::primCompressionFlags (RtPrimCompressionFlags): layout in bits [0:3], plus the vertex search
+// mode of the CompressPrims pass in bits [4:5] (e.g. 0x22 = fixed layout + search mode 2). The search mode does not
+// change the output.
 namespace PrimCompMode
 {
     static const uint32 Off            = 0; // No compression across triangle pairs
     static const uint32 VariableLayout = 1; // Primitive structure field sizes are computed per structure
     static const uint32 FixedLayout    = 2; // Primitive structure field sizes are the FIXED_* constants
+    static const uint32 LayoutMask     = 0xF;
+
+    static const uint32 SearchMode0    = 0x00; // Every remaining lane runs FindVerts in every pass (original)
+    static const uint32 SearchMode1    = 0x10; // Only lanes that can still fit in the structure run FindVerts
+    static const uint32 SearchMode2    = 0x20; // Per-batch links to the previous slot with the same vertex
+    static const uint32 SearchModeMask = 0x30;
 } // namespace PrimCompMode
 
 // Build shader flags derived from PrimCompMode
@@ -57,6 +65,8 @@ namespace PrimCompFlags
     static const uint32 FixedLayout                 = 2;
     static const uint32 EnableTrailingZeroAndPrefix = 4;
     static const uint32 reserved1                   = 8;
+    static const uint32 SearchMode1                 = 0x10; // Same values as PrimCompMode::SearchMode*
+    static const uint32 SearchMode2                 = 0x20;
 };
 
 // Intersectable instance node mode

@@ -49,6 +49,100 @@ static void FormatNow(
 }
 
 // =====================================================================================================================
+// Writes the process arguments after argv[0] (Linux: /proc/self/cmdline), space separated, so each header block of an
+// appended log names its run (e.g. the scene). Writes an empty string where they are unavailable.
+static void FormatArguments(
+    char*  pBuffer,
+    size_t bufferSize)
+{
+    pBuffer[0] = '\0';
+
+#if defined(__linux__)
+    FILE* pCmdline = fopen("/proc/self/cmdline", "rb");
+
+    if (pCmdline != nullptr)
+    {
+        size_t length  = 0;
+        bool   inArgv0 = true;
+        int    c       = 0;
+
+        while (((c = fgetc(pCmdline)) != EOF) && ((length + 1) < bufferSize))
+        {
+            if (c == '\0')
+            {
+                if ((inArgv0 == false) && (length > 0))
+                {
+                    pBuffer[length++] = ' ';
+                }
+                inArgv0 = false;
+            }
+            else if (inArgv0 == false)
+            {
+                pBuffer[length++] = ((c == '\n') || (c == '\r')) ? ' ' : static_cast<char>(c);
+            }
+        }
+
+        // Drop the separator written for the final argument terminator.
+        if ((length > 0) && (pBuffer[length - 1] == ' '))
+        {
+            length--;
+        }
+        pBuffer[length] = '\0';
+
+        fclose(pCmdline);
+    }
+#endif
+}
+
+#if GPURT_BUILD_RTIP3_1
+// =====================================================================================================================
+// Returns the build shader primitive compression flags (PrimCompFlags) of a BLAS build, i.e. the
+// BvhBuilder::m_buildConfig.primCompressionFlags it ran with. Must follow BvhBuilder: GetPrimCompressionFlags() turns
+// the PrimCompMode setting into flags; AllowUpdate builds drop MultiPrim and EnableTrailingZeroAndPrefix; procedural
+// BLASes keep only FixedLayout.
+static uint32 GetEffectivePrimCompFlags(
+    uint32 primCompMode,  // DeviceSettings::primCompressionFlags (RtPrimCompressionFlags)
+    uint32 buildFlags,    // AccelStructBuildFlags of the build
+    uint32 geometryType)  // GeometryType of the BLAS
+{
+    uint32 flags = 0;
+
+    const uint32 layout     = primCompMode & PrimCompMode::LayoutMask;
+    const uint32 searchMode = primCompMode & PrimCompMode::SearchModeMask;
+
+    if (layout != PrimCompMode::Off)
+    {
+        flags = PrimCompFlags::MultiPrim | PrimCompFlags::EnableTrailingZeroAndPrefix;
+
+        if (layout != PrimCompMode::VariableLayout)
+        {
+            flags |= PrimCompFlags::FixedLayout;
+        }
+
+        if (searchMode == PrimCompMode::SearchMode1)
+        {
+            flags |= PrimCompFlags::SearchMode1;
+        }
+        else if (searchMode != PrimCompMode::SearchMode0)
+        {
+            flags |= PrimCompFlags::SearchMode2;
+        }
+    }
+
+    if (geometryType == static_cast<uint32>(GeometryType::Aabbs))
+    {
+        flags &= PrimCompFlags::FixedLayout;
+    }
+    else if (Util::TestAnyFlagSet(buildFlags, AccelStructBuildFlagAllowUpdate))
+    {
+        flags &= ~(PrimCompFlags::MultiPrim | PrimCompFlags::EnableTrailingZeroAndPrefix);
+    }
+
+    return flags;
+}
+#endif
+
+// =====================================================================================================================
 BlasStatsLog::BlasStatsLog(
     Internal::Device* pDevice)
     :
@@ -227,11 +321,16 @@ void BlasStatsLog::WriteFileHeader()
     char now[64] = {};
     FormatNow(now, sizeof(now));
 
+    char arguments[1024] = {};
+    FormatArguments(arguments, sizeof(arguments));
+
     uint32 wideNodeMergingFlags = 0;
     uint32 obbFlags             = 0;
+    uint32 primCompMode         = 0;
 #if GPURT_BUILD_RTIP3_1
     wideNodeMergingFlags = settings.wideNodeMergingFlags;
     obbFlags             = settings.enableOrientedBoundingBoxes;
+    primCompMode         = settings.primCompressionFlags;
 #endif
 
 #if defined(SOGANG_EXPERIMENT) && SOGANG_EXPERIMENT
@@ -246,12 +345,17 @@ void BlasStatsLog::WriteFileHeader()
             exePath,
             m_pid,
             now);
+    fprintf(m_pFile, "# args: %s\n", arguments);
     fprintf(m_pFile,
-            "# settings: WideNodeMergingFlags=0x%x EnableOrientedBoundingBoxes=0x%x SOGANG_EXPERIMENT=%u\n",
+            "# settings: WideNodeMergingFlags=0x%x EnableOrientedBoundingBoxes=0x%x RtPrimCompressionFlags=%u "
+            "SOGANG_EXPERIMENT=%u\n",
             wideNodeMergingFlags,
             obbFlags,
+            primCompMode,
             SogangExperiment);
-    fprintf(m_pFile, "time,pid,seq,blasVA,numPrims,mergeFlags,obbFlags,pre,post,leafOnly,dobb,dobbLeafOnly\n");
+    fprintf(m_pFile,
+            "time,pid,seq,blasVA,numPrims,mergeFlags,obbFlags,pre,post,leafOnly,dobb,dobbLeafOnly,"
+            "primStructs,compactedBytes,primComp,numGeoms,buildFlags,badBoxSlots\n");
     fflush(m_pFile);
 }
 
@@ -331,6 +435,11 @@ void BlasStatsLog::Drain()
     char now[64] = {};
     FormatNow(now, sizeof(now));
 
+    uint32 primCompMode = 0;
+#if GPURT_BUILD_RTIP3_1
+    primCompMode = m_pDevice->Settings().primCompressionFlags;
+#endif
+
     for (const Record& record : records)
     {
         const uint32* pDw       = record.dw;
@@ -338,9 +447,19 @@ void BlasStatsLog::Drain()
                                   pDw[BLAS_STATS_ENTRY_BLAS_VA_LO];
         const uint32  post      = pDw[BLAS_STATS_ENTRY_POST];
         const uint32  followers = pDw[BLAS_STATS_ENTRY_FOLLOWERS];
+        const uint32  buildInfo = pDw[BLAS_STATS_ENTRY_BUILD_INFO];
+
+        const uint32 buildFlags   = buildInfo & 0xffff;
+        const uint32 geometryType = buildInfo >> BLAS_STATS_BUILD_INFO_GEOMETRY_TYPE_SHIFT;
+        const uint32 badBoxSlots  = pDw[BLAS_STATS_ENTRY_BAD_BOX_SLOTS];
+
+        uint32 primComp = 0;
+#if GPURT_BUILD_RTIP3_1
+        primComp = GetEffectivePrimCompFlags(primCompMode, buildFlags, geometryType);
+#endif
 
         fprintf(m_pFile,
-                "%s,%u,%u,0x%llx,%u,0x%x,0x%x,%u,%u,%u,%u,%u\n",
+                "%s,%u,%u,0x%llx,%u,0x%x,0x%x,%u,%u,%u,%u,%u,%u,%u,0x%x,%u,0x%x,%u\n",
                 now,
                 m_pid,
                 pDw[BLAS_STATS_ENTRY_SEQ],
@@ -352,16 +471,21 @@ void BlasStatsLog::Drain()
                 post,
                 pDw[BLAS_STATS_ENTRY_LEAF_ONLY],
                 pDw[BLAS_STATS_ENTRY_DOBB],
-                pDw[BLAS_STATS_ENTRY_DOBB_LEAF_ONLY]);
+                pDw[BLAS_STATS_ENTRY_DOBB_LEAF_ONLY],
+                pDw[BLAS_STATS_ENTRY_PRIM_STRUCTS],
+                pDw[BLAS_STATS_ENTRY_COMPACTED_BYTES],
+                primComp,
+                pDw[BLAS_STATS_ENTRY_NUM_GEOMETRIES],
+                buildFlags,
+                badBoxSlots);
 
-        if (pDw[BLAS_STATS_ENTRY_NODES_SCANNED] != post)
+        if (badBoxSlots != 0)
         {
-            // The dispatch was sized from the maximum node count, so this should not happen.
+            // Box slots with the invalid bounds pattern: their subtrees are unreachable, so this BLAS is corrupt.
             fprintf(m_pFile,
-                    "# warning: seq %u scanned %u of %u box nodes\n",
+                    "# warning: seq %u has %u used box slots with invalid bounds\n",
                     pDw[BLAS_STATS_ENTRY_SEQ],
-                    pDw[BLAS_STATS_ENTRY_NODES_SCANNED],
-                    post);
+                    badBoxSlots);
         }
     }
 

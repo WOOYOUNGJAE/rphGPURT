@@ -36,8 +36,10 @@ struct ObbDataSource
     static const float ObbKdopDirections[13 * 4];
     static uint ObbKdopFacets[48 * 4];
     static const uint ObbMatrixIndexLUT[1024 * 4];
+    static const uint MergePackLut[MERGE_PACK_LUT_UINT4_COUNT * 4];
 };
 #else
+#include "gpurtMergePackLut.h"
 static struct ObbDataSource
 {
     // OBB axes. 13 total.
@@ -386,6 +388,11 @@ static struct ObbDataSource
         56, 58, 92, 92, 35, 46, 98, 96, 72, 74, 54, 27, 84, 84, 59, 57,
         56, 58, 60, 92, 37, 61, 59, 96, 72, 58, 60, 29, 84, 61, 59, 57,
         56, 58, 60, 62, 62, 61, 59, 18, 18, 58, 60, 62, 62, 61, 59, 57,
+    };
+
+    // Min-node packing order for leaf-only box merging (WideNodeMergingFlags 0x10). See gpurtMergePackLut.h
+    const uint MergePackLut[MERGE_PACK_LUT_UINT4_COUNT * 4] = {
+        GPURT_MERGE_PACK_LUT_DATA
     };
 } obbData;
 #endif
