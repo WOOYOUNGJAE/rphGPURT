@@ -84,6 +84,16 @@ uint GetLdsOffsetVertex(uint baseLdsOffset)
            (g_laneGroup.groupIndex * (COMPRESSION_BATCH_SIZE * 9));
 }
 
+//======================================================================================================================
+uint GetLdsOffsetVertexLink(uint baseLdsOffset)
+{
+    // One link per vertex slot follows the vertex data in LDS
+    return baseLdsOffset +
+           (PRIMITIVE_STRUCT_SIZE_IN_DW * COMPRESSION_BATCHES_PER_GROUP) +
+           (COMPRESSION_BATCH_SIZE * 9 * COMPRESSION_BATCHES_PER_GROUP) +
+           (g_laneGroup.groupIndex * (COMPRESSION_BATCH_SIZE * 3));
+}
+
 namespace PrimStruct3_1 {
 //======================================================================================================================
 // Primitive structure encoder object. Mangages the data layout and writing of primitive structures.
@@ -474,6 +484,13 @@ static TriCompressState ComputeCompressedRanges(
     const uint maxCompressedPairs = (Settings.primCompressionFlags & PrimCompFlags::FixedLayout) ? 3 : 8;
     const uint maxPairs = compressMultiplePairs ? maxCompressedPairs : 1;
 
+    // Vertex search of the pass loop below (RtPrimCompressionFlags bits [4:5], see PrimCompMode). Spec constant.
+    //   mode 0: every remaining lane runs FindVerts in every pass (original)
+    //   mode 1: only lanes that can still fit in the structure (pair count <= maxPairs) run FindVerts
+    //   mode 2: per-batch links to the previous slot with the same vertex, walked in the pass loop (lanes as in mode 1)
+    const bool searchMode1 = (Settings.primCompressionFlags & PrimCompFlags::SearchMode1) != 0;
+    const bool searchMode2 = (Settings.primCompressionFlags & PrimCompFlags::SearchMode2) != 0;
+
     const uint childIdx       = countbits64(primRangeStartMask & bits64(primListIndex)) + numBoxChildren;
     const bool primRangeStart = (primRangeStartMask & bit64(primListIndex));
     const bool primRangeEnd   = (primRangeEndMask & bit64(primListIndex));
@@ -492,6 +509,31 @@ static TriCompressState ComputeCompressedRanges(
     StoreVert(baseLdsOffset, primListIndex * 3 + 0, v0);
     StoreVert(baseLdsOffset, primListIndex * 3 + 1, v1);
     StoreVert(baseLdsOffset, primListIndex * 3 + 2, v2);
+
+    // (Search mode 2) Link each vertex slot of this triangle to the previous slot in the batch that holds the same
+    // vertex. A structure starts at a tri0 and holds at most maxPairs pairs, so only the (2 * maxPairs - 1) prims before
+    // this one can share a structure with it, and only those are searched. This loop has no early exit, so its LDS reads
+    // can be issued back to back.
+    const uint ownSlot = primListIndex * 3;
+    const uint linkLds = GetLdsOffsetVertexLink(baseLdsOffset);
+    if (searchMode2)
+    {
+        const uint lookbackPrims = (2 * maxPairs) - 1;
+        const uint lowSlot = (primListIndex > lookbackPrims) ? ((primListIndex - lookbackPrims) * 3) : 0;
+
+        uint3 prevSlot = uint3(INVALID_IDX, INVALID_IDX, INVALID_IDX);
+        for (int i = int(ownSlot) + 1; i >= int(lowSlot); i--)
+        {
+            const float3 vert = ReadVert(baseLdsOffset, uint(i));
+            prevSlot.x = ((prevSlot.x == INVALID_IDX) && (uint(i) < ownSlot)       && all(v0 == vert)) ? uint(i) : prevSlot.x;
+            prevSlot.y = ((prevSlot.y == INVALID_IDX) && (uint(i) < (ownSlot + 1)) && all(v1 == vert)) ? uint(i) : prevSlot.y;
+            prevSlot.z = ((prevSlot.z == INVALID_IDX)                              && all(v2 == vert)) ? uint(i) : prevSlot.z;
+        }
+
+        SetSharedMem(linkLds + ownSlot + 0, prevSlot.x);
+        SetSharedMem(linkLds + ownSlot + 1, prevSlot.y);
+        SetSharedMem(linkLds + ownSlot + 2, prevSlot.z);
+    }
 
     uint numPrimsDone  = 0;
     uint basePrimIndex = 0;
@@ -519,8 +561,40 @@ static TriCompressState ComputeCompressedRanges(
             GPU_ASSERT(numPrimsDone == g_laneGroup.laneIndex);
         }
 
-        const uint3 index =
-            FindVerts(baseLdsOffset, basePrimIndex, primListIndex, v0, v1, v2);
+        // Pair count of this lane if the structure starts at basePrimIndex. It only depends on the active lanes.
+        const uint triPairDescCount = g_laneGroup.ExclusivePrefixSumBool(isTri0) + isTri0;
+
+        // Index of each vertex = its first slot at or after the structure base.
+        // A lane past maxPairs cannot be part of this structure (TryInit is not called for it) and its vertex mask bits
+        // only reach lanes above it, so search modes 1 and 2 skip its search; the result is unchanged.
+        // FindVerts scans [basePrimIndex, primListIndex] serially and the wave waits for its slowest lane, so in mode 0 a
+        // pass costs as much as the distance from the base to the last prim of the batch.
+        uint3 index = uint3(0, 0, 0);
+        if (searchMode2 == false)
+        {
+            if ((searchMode1 == false) || (triPairDescCount <= maxPairs))
+            {
+                index = FindVerts(baseLdsOffset, basePrimIndex, primListIndex, v0, v1, v2);
+            }
+        }
+        else if (triPairDescCount <= maxPairs)
+        {
+            // (Search mode 2) Walk the links back while they stay at or after the base.
+            const uint baseSlot = basePrimIndex * 3;
+
+            [unroll]
+            for (uint c = 0; c < 3; c++)
+            {
+                uint slot = ownSlot + c;
+                uint prev = GetSharedMem(linkLds + slot);
+                while ((prev != INVALID_IDX) && (prev >= baseSlot))
+                {
+                    slot = prev;
+                    prev = GetSharedMem(linkLds + slot);
+                }
+                index[c] = slot - baseSlot;
+            }
+        }
 
         uint3 planeDiffs =
             (asuint(v0) ^ prefixSource) |
@@ -546,8 +620,6 @@ static TriCompressState ComputeCompressedRanges(
         vertexMask.PostfixOr();
 
         uniqueVertexCount = vertexMask.CountBits();
-
-        const uint triPairDescCount = g_laneGroup.ExclusivePrefixSumBool(isTri0) + isTri0;
 
         bool valid = false;
 

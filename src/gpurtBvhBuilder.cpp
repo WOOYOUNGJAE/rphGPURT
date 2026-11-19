@@ -261,13 +261,26 @@ static uint32 GetPrimCompressionFlags(
 {
     uint32 primCompressionFlags = 0;
 
-    if (primCompressionMode != PrimCompMode::Off)
+    const uint32 layout     = primCompressionMode & PrimCompMode::LayoutMask;
+    const uint32 searchMode = primCompressionMode & PrimCompMode::SearchModeMask;
+
+    if (layout != PrimCompMode::Off)
     {
         primCompressionFlags = PrimCompFlags::MultiPrim | PrimCompFlags::EnableTrailingZeroAndPrefix;
 
-        if (primCompressionMode != PrimCompMode::VariableLayout)
+        if (layout != PrimCompMode::VariableLayout)
         {
             primCompressionFlags |= PrimCompFlags::FixedLayout;
+        }
+
+        // Vertex search of the CompressPrims pass (mode 2 wins if both bits are set)
+        if (searchMode == PrimCompMode::SearchMode1)
+        {
+            primCompressionFlags |= PrimCompFlags::SearchMode1;
+        }
+        else if (searchMode != PrimCompMode::SearchMode0)
+        {
+            primCompressionFlags |= PrimCompFlags::SearchMode2;
         }
     }
 
