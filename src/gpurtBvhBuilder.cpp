@@ -1146,7 +1146,7 @@ BvhBuilder::ScratchBufferInfo BvhBuilder::CalculateScratchBufferInfoDefault(
     // BVH2 & QBVH
     uint32 bvhNodeData = 0xFFFFFFFF;
     uint32 bvhLeafNodeData = 0xFFFFFFFF;
-    uint32 bvhWideNodeData = 0xFFFFFFFF; // TODO : Replace this if it can be written directly into the BVH2 scratch node data (bvhNodeData) buffer.
+    uint32 bvhWideNodeData = 0xFFFFFFFF; // (collapse-time merge) block info instead, see MERGE_BLOCK_INFO_*
     uint32 fastLBVHRootNodeIndex = 0xFFFFFFFF;
 #if GPURT_BUILD_RTIP3_1
     uint32 primCompNodeIndices = 0xFFFFFFFF;
@@ -1355,15 +1355,24 @@ BvhBuilder::ScratchBufferInfo BvhBuilder::CalculateScratchBufferInfoDefault(
             primCompNodeIndicesEnd = runningOffset;
         }
 #endif
-        if (m_buildConfig.enableWideNodeMerging)
+        if (m_buildConfig.enableLegacyPostCollapseMerging)
         {
             // Counter offsets must be assigned consecutively.
             scratchWideNodeCounter = ReserveBytes(sizeof(uint32), &runningOffset);
             wideNodeEncodingDoneCounter = ReserveBytes(sizeof(uint32), &runningOffset);
 
+            // ScratchWideNodes of CollapseScratchBvh + EncodeScratchBvh
             static constexpr size_t RayTracingScratchWideNodeSize = 64;
             bvhWideNodeData = ReserveBytes(nodeCount * RayTracingScratchWideNodeSize, &runningOffset);
         }
+#if GPURT_BUILD_RTIP3_1
+        else if (m_buildConfig.enableCollapseTimeMerging)
+        {
+            runningOffset = Util::Pow2Align(runningOffset, 64u);
+            bvhWideNodeData =
+                ReserveBytes(GetNumInternalNodeCount() * MERGE_BLOCK_INFO_STRIDE, &runningOffset);
+        }
+#endif
 #if SOGANG_EXPERIMENT
         sgDebugCounters = ReserveBytes(sizeof(uint32) * 8, &runningOffset);
 #endif
@@ -2006,11 +2015,34 @@ void BvhBuilder::InitBuildConfig(
     }
 #endif
 
+    // WideNodeMergingFlags: BLAS only (TLAS merging is not supported because box-splitting is more efficient)
+    // Enable (0x1) is the collapse-time merge (CollapseAndEncodeScratchBvh)
+    // LegacyPostCollapse (0x2) the post-collapse merge (CollapseScratchBvh + EncodeScratchBvh). 
+    const uint32 wideNodeMergingFlags = m_deviceSettings.wideNodeMergingFlags;
+    const bool   useLegacyPostCollapseMerging =
+        (wideNodeMergingFlags & static_cast<uint32>(GpuRt::WideNodeMergingFlags::LegacyPostCollapse)) != 0;
+    const bool   wideNodeMergingRequested = useLegacyPostCollapseMerging ||
+        ((wideNodeMergingFlags & static_cast<uint32>(GpuRt::WideNodeMergingFlags::Enable)) != 0);
+
     m_buildConfig.enableWideNodeMerging =
-        UpdateAllowed() == false &&
-        m_buildConfig.shouldUseTrivialBuilder == false &&
-        ((m_buildConfig.topLevelBuild == true && (m_deviceSettings.wideNodeMergingFlags & static_cast<uint32>(GpuRt::WideNodeMergingFlags::TLAS))) ||
-        (m_buildConfig.topLevelBuild == false && (m_deviceSettings.wideNodeMergingFlags & static_cast<uint32>(GpuRt::WideNodeMergingFlags::BLAS))));
+        (UpdateAllowed() == false) &&
+        (m_buildConfig.shouldUseTrivialBuilder == false) &&
+        (m_buildConfig.topLevelBuild == false) &&
+        wideNodeMergingRequested;
+
+    // CollapseAndEncodeScratchBvh is EncodeHwBvh3_1 plus the collapse-time merge.
+    m_buildConfig.useCollapseAndEncodePass = false;
+#if GPURT_BUILD_RTIP3_1
+    m_buildConfig.useCollapseAndEncodePass =
+        (m_buildConfig.topLevelBuild == false) &&
+        (m_pDevice->GetRtIpLevel() == Pal::RayTracingIpLevel::RtIp3_1) &&
+        wideNodeMergingRequested &&
+        (useLegacyPostCollapseMerging == false);
+#endif
+    m_buildConfig.enableCollapseTimeMerging =
+        m_buildConfig.enableWideNodeMerging && m_buildConfig.useCollapseAndEncodePass;
+    m_buildConfig.enableLegacyPostCollapseMerging =
+        m_buildConfig.enableWideNodeMerging && (m_buildConfig.useCollapseAndEncodePass == false);
 
     // Max geometries we can fit in the SRD table for merged encode buiping ld/update
     const uint32 maxDescriptorTableSize = (m_cmdBuffer != nullptr) ?
@@ -2685,7 +2717,7 @@ void BvhBuilder::InitAccelerationStructure()
     ResetTaskQueueCounters(m_scratchOffsets.rebraidTaskQueueCounter);
     ResetTaskQueueCounters(m_scratchOffsets.plocTaskQueueCounter);
 
-    if (m_buildConfig.enableWideNodeMerging)
+    if (m_buildConfig.enableLegacyPostCollapseMerging)
     {
         const uint numScratchWideNodeCounters = 2;
         const gpusize wideNodeMergingOffset = ScratchBufferBaseVa() + m_scratchOffsets.scratchWideNodeCounter;
@@ -2960,7 +2992,17 @@ void BvhBuilder::InitBuildSettings()
     m_buildSettings.obbNumLevels                 = m_deviceSettings.obbNumLevels;
 #endif
     m_buildSettings.boxSplittingFlags            = m_deviceSettings.boxSplittingFlags;
-    m_buildSettings.wideNodeMergingFlags         = m_deviceSettings.wideNodeMergingFlags;
+    // Flags for the shaders: 0 when this build does not merge.
+    m_buildSettings.wideNodeMergingFlags = 0;
+    if (m_buildConfig.enableWideNodeMerging)
+    {
+        m_buildSettings.wideNodeMergingFlags = static_cast<uint32>(GpuRt::WideNodeMergingFlags::Enable);
+        if (m_buildConfig.enableLegacyPostCollapseMerging)
+        {
+            m_buildSettings.wideNodeMergingFlags |=
+                static_cast<uint32>(GpuRt::WideNodeMergingFlags::LegacyPostCollapse);
+        }
+    }
     m_buildSettings.enableBvhChannelBalancing    = m_deviceSettings.enableBvhChannelBalancing;
     m_buildSettings.tlasRefittingMode            = m_deviceSettings.tlasRefittingMode;
     // TLAS Refitting is disabled for procedural geometry
@@ -4200,7 +4242,11 @@ BuildPhaseFlags BvhBuilder::EnabledPhases() const
             {
                 flags |= BuildPhaseFlags::PairCompression;
             }
-            if (m_buildConfig.enableWideNodeMerging)
+            if (m_buildConfig.useCollapseAndEncodePass)
+            {
+                flags |= BuildPhaseFlags::CollapseAndEncodeScratchBvh;
+            }
+            else if (m_buildConfig.enableWideNodeMerging)
             {
                 flags |= BuildPhaseFlags::CollapseScratchBvh;
                 flags |= BuildPhaseFlags::EncodeScratchBvh;
@@ -4780,6 +4826,35 @@ void BvhBuilder::EncodeScratchBvh()
     INTERNAL_TIMESTAMP_BEGIN();
 
     RGP_PUSH_MARKER("Encode Scratch BVH (nodeCount %u)", nodeCount);
+    Dispatch(numThreadGroups);
+    RGP_POP_MARKER();
+
+    INTERNAL_TIMESTAMP_END();
+}
+
+// =====================================================================================================================
+// (Collapse-time merge, WideNodeMergingFlags 0x1)
+// EncodeHwBvh with the CollapseScratchBvh + EncodeScratchBvh merging in the same dispatch.
+void BvhBuilder::CollapseAndEncodeScratchBvh()
+{
+    BindPipeline(InternalRayTracingCsType::CollapseAndEncodeScratchBvh);
+
+    const uint32 nodeCount       = GetNumInternalNodeCount();
+    const uint32 numThreadGroups = Util::RoundUpQuotient(nodeCount, DefaultThreadGroupSize);
+
+    BuildShaderRootConstants0 shaderConstants =
+    {
+       .numThreads = numThreadGroups * DefaultThreadGroupSize
+    };
+#if GPURT_BUILD_RTIP3_1
+    WriteBuildBufferBindings(shaderConstants, BuildBufferBindingFlags::ObbLut);
+#else
+    WriteBuildBufferBindings(shaderConstants);
+#endif
+
+    INTERNAL_TIMESTAMP_BEGIN();
+
+    RGP_PUSH_MARKER("Collapse And Encode Scratch BVH (nodeCount %u)", nodeCount);
     Dispatch(numThreadGroups);
     RGP_POP_MARKER();
 

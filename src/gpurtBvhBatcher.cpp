@@ -590,6 +590,11 @@ void BvhBatcher::BuildMultiDispatch(Util::Span<BvhBuilder> builders)
         Barrier();
         BuildPhase(BuildPhaseFlags::EncodeScratchBvh, builders, &BvhBuilder::EncodeScratchBvh);
     }
+    else if (PhaseEnabled(BuildPhaseFlags::CollapseAndEncodeScratchBvh))
+    {
+        Barrier();
+        BuildPhase(BuildPhaseFlags::CollapseAndEncodeScratchBvh, builders, &BvhBuilder::CollapseAndEncodeScratchBvh);
+    }
     else if (PhaseEnabled(BuildPhaseFlags::EncodeHwBvh))
     {
         Barrier();

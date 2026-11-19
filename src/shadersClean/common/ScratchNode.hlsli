@@ -40,6 +40,9 @@ struct ScratchNode
     uint   right_or_geometryIndex;         // right child for internal nodes /
                                            // geometryIndex if it's a leaf node
     float3 sah_or_v2_or_instBasePtr;       // SAH cost, area and density for internal nodes /
+                                           // (.z as uint: leaf slot count of BLAS internal nodes with
+                                           //  collapse-time merging (WideNodeMergingFlags 0x1), see
+                                           //  SCRATCH_NODE_LEAF_SLOT_COUNT_OFFSET) /
                                            // vertex2 for triangle nodes /
                                            // instanceNodeBasePointerLo, instanceNodeBasePointerHi for instance node
     uint   parent;
@@ -72,6 +75,10 @@ struct ScratchNode
 #define SCRATCH_NODE_GEOMETRY_INDEX_OFFSET            SCRATCH_NODE_RIGHT_OFFSET
 #define SCRATCH_NODE_COST_OFFSET                      32
 #define SCRATCH_NODE_SA_OFFSET                        36
+// Internal BLAS nodes only (collapse-time merging, WideNodeMergingFlags 0x1): leaf slot count, the number of leaf
+// slots (a collapsed prim range is one slot) that a full wide collapse of the node fills, clamped to
+// LEAF_SLOT_COUNT_NOT_LEAF_ONLY. Not a primitive count.
+#define SCRATCH_NODE_LEAF_SLOT_COUNT_OFFSET           40
 #define SCRATCH_NODE_V2_OFFSET                        SCRATCH_NODE_COST_OFFSET
 #define SCRATCH_NODE_INSTANCE_BASE_PTR_OFFSET         SCRATCH_NODE_V2_OFFSET
 #define SCRATCH_NODE_PARENT_OFFSET                    44

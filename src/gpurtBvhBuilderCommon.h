@@ -58,6 +58,7 @@ enum class BuildPhaseFlags : uint32_t
 #endif
     SeparateEmitPostBuildInfoPass = 1 << 12,
     BuildParallel                 = 1 << 13,
+    CollapseAndEncodeScratchBvh   = 1 << 14,
     BuildFastAgglomerativeLbvh    = 1 << 15,
     EncodeQuadPrimitives          = 1 << 16,
     BuildHPLOC                    = 1 << 17,
@@ -88,6 +89,7 @@ enum class DetailedBuildPhaseFlags : uint64_t
 #endif
     SeparateEmitPostBuildInfoPass = 1LLU << 12,
     BuildParallel                 = 1LLU << 13,
+    CollapseAndEncodeScratchBvh   = 1LLU << 14,
     BuildFastAgglomerativeLbvh    = 1LLU << 15,
     EncodeQuadPrimitives          = 1LLU << 16,
     BuildHPLOC                    = 1LLU << 17,
@@ -145,6 +147,8 @@ static const char* BuildPhaseName(BuildPhaseFlags phase)
         return "BuildPLOC";
     case GpuRt::BuildPhaseFlags::EncodeScratchBvh:
         return "EncodeScratchBvh";
+    case GpuRt::BuildPhaseFlags::CollapseAndEncodeScratchBvh:
+        return "CollapseAndEncodeScratchBvh";
     case GpuRt::BuildPhaseFlags::PairCompression:
         return "PairCompression";
 #if GPURT_BUILD_RTIP3_1
@@ -193,6 +197,8 @@ static const char* DetailedBuildPhaseName(DetailedBuildPhaseFlags phase)
         return "BuildPLOC";
     case GpuRt::DetailedBuildPhaseFlags::EncodeScratchBvh:
         return "EncodeScratchBvh";
+    case GpuRt::DetailedBuildPhaseFlags::CollapseAndEncodeScratchBvh:
+        return "CollapseAndEncodeScratchBvh";
     case GpuRt::DetailedBuildPhaseFlags::PairCompression:
         return "PairCompression";
 #if GPURT_BUILD_RTIP3_1

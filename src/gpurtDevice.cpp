@@ -546,6 +546,7 @@ void Device::PopulateAccelStructInternalPhaseProperties(
 #endif
         DetailedBuildPhaseFlags::CollapseScratchBvh,
         DetailedBuildPhaseFlags::EncodeScratchBvh,
+        DetailedBuildPhaseFlags::CollapseAndEncodeScratchBvh,
         DetailedBuildPhaseFlags::EncodeHwBvh,
 #if GPURT_BUILD_RTIP3_1
         DetailedBuildPhaseFlags::CompressPrims,

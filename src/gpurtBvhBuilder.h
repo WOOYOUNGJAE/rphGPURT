@@ -258,6 +258,9 @@ private:
         bool                            nonInlinePostBuildEmits;
         uint32                          rebraidFactor;
         bool                            enableWideNodeMerging;
+        bool                            enableLegacyPostCollapseMerging; // merging in CollapseScratchBvh + EncodeScratchBvh
+        bool                            enableCollapseTimeMerging;       // node merging in CollapseAndEncodeScratchBvh
+        bool                            useCollapseAndEncodePass;        // replaces EncodeHwBvh3_1, merging or not
     };
 
     BvhBuilder(
@@ -390,6 +393,8 @@ private:
     void CollapseScratchBvh();
 
     void EncodeScratchBvh();
+
+    void CollapseAndEncodeScratchBvh();
 
     void EncodeHwBvh();
 

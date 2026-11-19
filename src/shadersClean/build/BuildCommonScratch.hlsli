@@ -316,6 +316,32 @@ float FetchScratchNodeCost(
     return FetchScratchNodeData<float>(baseScratchNodesOffset, nodeIndex, SCRATCH_NODE_COST_OFFSET);
 }
 
+#if GPURT_BUILD_RTIP3_1
+//=====================================================================================================================
+// Leaf slot count (collapse-time merge): the number of leaf slots a full wide collapse of a BLAS node fills (a
+// collapsed prim range is one slot), clamped to LEAF_SLOT_COUNT_NOT_LEAF_ONLY. A count <= 8 means a leaf-only box.
+#define LEAF_SLOT_COUNT_NOT_LEAF_ONLY 9u
+
+//=====================================================================================================================
+bool IsLeafSlotCountEnabled()
+{
+    // ENABLE without LEGACY_POST_COLLAPSE: a collapse-time merging build
+    return ((Settings.wideNodeMergingFlags &
+             (WIDE_NODE_MERGING_FLAG_ENABLE | WIDE_NODE_MERGING_FLAG_LEGACY_POST_COLLAPSE)) ==
+            WIDE_NODE_MERGING_FLAG_ENABLE) &&
+           (Settings.topLevelBuild == false);
+}
+
+//=====================================================================================================================
+// Only valid when IsLeafSlotCountEnabled(). A BVH2 leaf counts as 1 (it does not store the count).
+uint FetchScratchNodeLeafSlotCount(
+    in ScratchNode node,
+    in bool        isLeaf)
+{
+    return isLeaf ? 1u : asuint(node.sah_or_v2_or_instBasePtr.z);
+}
+#endif
+
 //=====================================================================================================================
 uint FetchSortedPrimIndex(
     uint baseSortedPrimIndicesOffset,
@@ -1030,7 +1056,31 @@ void MergeScratchNodes(
             }
         }
 
-        WriteScratchNodeCost(scratchNodesOffset, mergedNodeIndex, bestCost);
+#if GPURT_BUILD_RTIP3_1
+        // (collapse-time merge) Store the leaf slot count together with the cost and surface area (one store)
+        if (IsLeafSlotCountEnabled())
+        {
+            const bool isPrimRange = CollapseAnyPairs() ? (numTris == 2) : isCollapsed;
+
+            uint leafSlotCount = 1;
+            if (isPrimRange == false)
+            {
+                const uint leftCount  = FetchScratchNodeLeafSlotCount(leftNode, IsLeafNode(leftNodeIndex, numActivePrims));
+                const uint rightCount =
+                    FetchScratchNodeLeafSlotCount(rightNode, IsLeafNode(rightNodeIndex, numActivePrims));
+                leafSlotCount = min(leftCount + rightCount, LEAF_SLOT_COUNT_NOT_LEAF_ONLY);
+            }
+
+            WriteScratchNodeData(scratchNodesOffset,
+                                 mergedNodeIndex,
+                                 SCRATCH_NODE_COST_OFFSET,
+                                 uint3(asuint(bestCost), asuint(mergedBoxSurfaceArea), leafSlotCount));
+        }
+        else
+#endif
+        {
+            WriteScratchNodeCost(scratchNodesOffset, mergedNodeIndex, bestCost);
+        }
         WriteScratchNodeNumPrimitives(scratchNodesOffset, mergedNodeIndex, numTris, isCollapsed);
     }
 }
