@@ -92,11 +92,13 @@ bool EnableWaveLeafCompressionPass()
 }
 
 //=====================================================================================================================
-// (Merge) Whether this pass merges: a merging BLAS build (IsLeafSlotCountEnabled) with the wave leaf compression pass
+// (Merge) Whether this pass merges: a merging triangle BLAS build (IsLeafSlotCountEnabled), with or without the leaf
+// compression pass. Without it, each leaf slot gets one inline primitive structure, which also works for block nodes.
+// Procedural BLAS do not merge.
 bool IsCollapseTimeMergeEnabled()
 {
 #if (MERGE_BOX_NODES_FLAG == 2)
-    return IsLeafSlotCountEnabled() && EnableWaveLeafCompressionPass();
+    return IsLeafSlotCountEnabled() && (IsTrianglePrimitiveBuild() || IsCompressedTrianglePrimitiveBuild());
 #else
     return false; // merging needs MERGE_BOX_NODES_FLAG == 2
 #endif
@@ -1078,7 +1080,8 @@ static void EncodeCompressedBoxNode(
         const uint baseNodeOffset  = isLeaf ? baseLeafNodeOffset : baseBoxNodeOffset;
         const uint offset          = childSlot;
 
-        // (Merge) followers also point to the leader's dst node
+        // (Merge) Used for leaders and leaves only. A follower's dstBoxChildIdx counts its own leader, so this would be
+        // the next leader's node (HW finds the leader's node from the range lengths above).
         const uint childNodeOffset =
             baseNodeOffset + ((isLeaf ? boxOrLeafChildIndex : dstBoxChildIdx) * QBVH8::NodeSizeInBytes);
 

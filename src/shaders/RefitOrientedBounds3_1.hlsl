@@ -154,6 +154,22 @@ uint GetBlockMemberKdopIndex(
 }
 
 //=====================================================================================================================
+// True when the encode wrote one primitive structure per leaf slot itself (no leaf compression pass, same condition
+// as EnableLeafCompressionPass() in the encode shaders). Box nodes and primitive structures are then interleaved in
+// [0, box node count + primitive structure count) instead of box nodes coming first.
+// (Reads geometryType directly: BuildSingleThreadGroup includes this file without BuildCommonScratch.hlsli.)
+bool HasInlinePrimStructs()
+{
+    const bool isTriangleBuild = (Settings.topLevelBuild == 0) &&
+                                 ((Settings.geometryType == GEOMETRY_TYPE_TRIANGLES) ||
+                                  (Settings.geometryType == GEOMETRY_TYPE_COMPRESSED_TRIANGLES) ||
+                                  (Settings.geometryType == GEOMETRY_TYPE_COMPRESSED_TRIANGLES_OMM));
+
+    return (isTriangleBuild &&
+            ((Settings.primCompressionFlags & PrimCompFlags::MultiPrim) || (Settings.maxPrimRangeSize > 2))) == false;
+}
+
+//=====================================================================================================================
 BoundingBox ComputeTriangleKDop(
     const uint         laneGroupIndex,
     const TriangleData tri,
@@ -780,7 +796,7 @@ void RefitOrientedBoundsImpl(
         uint followerSlotBase = 0;
 #if (MERGE_BOX_NODES_FLAG == 2)
         // Followers have no node of their own in the compacted dst BVH, so their K-DOP slots are allocated past
-        // the last dst box node. Together with the leaders this never exceeds the number of wide nodes, which is
+        // the last dst node. Together with the leaders this never exceeds the number of wide nodes, which is
         // what the K-DOP buffer is sized for without compaction.
         if (laneGroup.IsFirstLane() && isLeafOnlyBlockNode && (countbits(leafStartMask) > 1))
         {
@@ -790,8 +806,15 @@ void RefitOrientedBoundsImpl(
                 countbits(leafStartMask) - 1u,
                 followerSlotOffset);
 
-            followerSlotBase =
-                ReadAccelStructHeaderField(ACCEL_STRUCT_HEADER_NUM_INTERNAL_FP32_NODES_OFFSET) + followerSlotOffset;
+            // With inline primitive structures, box nodes also sit past the box node count, so start after the
+            // primitive structures too (the K-DOP buffer then has a slot per leaf as well)
+            uint numDstNodes = ReadAccelStructHeaderField(ACCEL_STRUCT_HEADER_NUM_INTERNAL_FP32_NODES_OFFSET);
+            if (HasInlinePrimStructs())
+            {
+                numDstNodes += ReadAccelStructHeaderField(ACCEL_STRUCT_HEADER_NUM_LEAF_NODES_OFFSET);
+            }
+
+            followerSlotBase = numDstNodes + followerSlotOffset;
         }
         followerSlotBase = laneGroup.ReadFirstLane(followerSlotBase);
 #endif

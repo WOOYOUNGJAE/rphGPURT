@@ -2051,6 +2051,12 @@ void BvhBuilder::InitBuildConfig(
         (m_buildConfig.shouldUseTrivialBuilder == false) &&
         (m_buildConfig.topLevelBuild == false) &&
         wideNodeMergingRequested;
+#if GPURT_BUILD_RTIP3_1
+    // EncodeScratchBvh writes no inline primitive structures, so the legacy post-collapse merge needs the CompressPrims
+    // pass. Without it the BLAS is built by EncodeHwBvh without merging.
+    m_buildConfig.enableWideNodeMerging &=
+        ((useLegacyPostCollapseMerging == false) || m_buildConfig.enableCompressPrimsPass);
+#endif
 
     // CollapseAndEncodeScratchBvh is EncodeHwBvh3_1 plus the collapse-time merge.
     m_buildConfig.useCollapseAndEncodePass = false;
