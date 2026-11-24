@@ -407,7 +407,7 @@ void PostHwBvhBuild(
             EmitBuffer.Store2(0, uint2(compactedSize, 0));
         }
 
-        WriteUpdateGroupCount(RTIP3_1_UPDATE_THREADS_PER_FAT_LEAF);
+        WriteUpdateGroupCount(RTIP3_1_UPDATE_THREADS_PER_FAT_LEAF, false);
     }
 }
 #endif

@@ -147,6 +147,44 @@ static uint ReadQBVH8ParentPointer(
 }
 
 //=====================================================================================================================
+// Number of distinct box child nodes of a box node, i.e. how many children reach it during an update. With wide-node
+// merging, the consecutive box slots of a block point to one node: every member slot after the first follows a box
+// slot with NodeRangeLength 0, so it is not counted. The last box slot of a merging node also has NodeRangeLength 0,
+// but no box slot follows it. Without merging every box slot has NodeRangeLength 1 and this is the box slot count.
+static uint ComputeQuantizedBoxDistinctBoxChildCount(
+    in uint metadataSize,
+    in uint nodePointer)
+{
+    const uint nodeOffset = metadataSize + ExtractNodePointerOffset(nodePointer);
+
+    const uint validChildCount =
+        ExtractValidChildCount(SrcBuffer.Load(nodeOffset + QUANTIZED_BVH8_NODE_OFFSET_EXP_CHILD_IDX_AND_VALID_COUNT));
+
+    uint distinctBoxCount = 0;
+    bool prevBoxSharesNode = false; // the previous box slot has NodeRangeLength 0
+
+    // Box children are sorted to the beginning of the child list
+    for (uint i = 0; i < validChildCount; ++i)
+    {
+        const uint packedChildTypeAndRange = SrcBuffer.Load(
+            nodeOffset + GetChildInfoOffset(i) + QUANTIZED_NODE_CHILD_INFO_OFFSET_MAXY_MAXZ_NODE_TYPE_AND_RANGE);
+
+        if (bitFieldExtract(packedChildTypeAndRange, 24, 4) != NODE_TYPE_BOX_QUANTIZED_BVH8)
+        {
+            break;
+        }
+
+        if (prevBoxSharesNode == false)
+        {
+            distinctBoxCount++;
+        }
+        prevBoxSharesNode = (bitFieldExtract(packedChildTypeAndRange, 28, 4) == 0);
+    }
+
+    return distinctBoxCount;
+}
+
+//=====================================================================================================================
 static uint ComputeQuantizedBoxChildIndexAndValidBoxCount(
     in uint              metadataSize,
     in uint              parentNodePointer,

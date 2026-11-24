@@ -1046,7 +1046,17 @@ static void EncodeCompressedBoxNode(
 
         // Store the source box bitfield in the upper bits of the OBB DWORD (unused by HW). This is used to construct
         // four filter boxes for instances.
-        QBVH8::WriteObbMatrixIndex(currNodeOffset, PackObbMatrixIndexBits(INVALID_OBB, packedSourceBoxes));
+        uint obbMatrixIndexBits = PackObbMatrixIndexBits(INVALID_OBB, packedSourceBoxes);
+
+        // (Merge) Allow-update builds also store a block node's leaf start mask in bits [31:24] (0 for other nodes), so
+        // Update3_1 can refit each member's parent slot from its own leaf segment. These builds have no OBBs, so the
+        // OBB refit's 16-bit write of bits [15:0] never runs on them.
+        if (IsUpdateAllowed())
+        {
+            GPU_ASSERT(leafStartMask <= bits(QUANTIZED_BVH8_NODE_LEAF_START_MASK_BITS));
+            obbMatrixIndexBits |= leafStartMask << QUANTIZED_BVH8_NODE_LEAF_START_MASK_SHIFT;
+        }
+        QBVH8::WriteObbMatrixIndex(currNodeOffset, obbMatrixIndexBits);
 
         if ((Settings.topLevelBuild == false) && (EnableLeafCompressionPass() == false))
         {
@@ -1585,7 +1595,7 @@ void CollapseAndEncodeScratchBvh(
 
     BEGIN_TASK(1);
 
-    PostHwBvhBuild(localId, numActivePrims);
+    PostHwBvhBuild(localId, numActivePrims, Gfx12::IsCollapseTimeMergeEnabled());
 
     if (globalId == 0)
     {

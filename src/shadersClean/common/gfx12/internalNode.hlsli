@@ -46,6 +46,20 @@ static const uint ObbDisabled = 0x7f;
 #define QUANTIZED_BVH4_NODE_OFFSET_EXP_CHILD_IDX_AND_VALID_COUNT 12
 #define QUANTIZED_BVH4_NODE_OFFSET_CHILD_INFO_0                  16
 
+// (Merge) obbMatrixIndex bits [31:24]: leaf start mask of a merged block node in an allow-update BLAS (bit k: a member's
+// leaf segment starts at leaf k, bit 0 is the leader), 0 for every other node. Written by CollapseAndEncodeScratchBvh,
+// read by Update3_1. Not used by HW, which reads only the OBB matrix index in the low bits.
+#define QUANTIZED_BVH8_NODE_LEAF_START_MASK_SHIFT 24
+#define QUANTIZED_BVH8_NODE_LEAF_START_MASK_BITS   8
+
+//=====================================================================================================================
+static uint ExtractLeafStartMask(
+    uint obbMatrixIndex)
+{
+    const uint mask = (1u << QUANTIZED_BVH8_NODE_LEAF_START_MASK_BITS) - 1u;
+    return (obbMatrixIndex >> QUANTIZED_BVH8_NODE_LEAF_START_MASK_SHIFT) & mask;
+}
+
 //=====================================================================================================================
 // Quantized internal BVH8 node information
 //=====================================================================================================================
@@ -113,7 +127,7 @@ struct QuantizedBVH8BoxNode
     void SetIndexInParent(uint indexInParent);
     uint ValidChildCount();
     void SetValidChildCount(uint childCount);
-    uint LeaderMask();
+    uint LeafStartMask();
     void SetLeafPointer(
         uint childIndex,
         uint startTriStructOffset,
@@ -295,9 +309,9 @@ inline void QuantizedBVH8BoxNode::SetValidChildCount(uint childCount)
 }
 
 //=====================================================================================================================
-inline uint QuantizedBVH8BoxNode::LeaderMask()
+inline uint QuantizedBVH8BoxNode::LeafStartMask()
 {
-    return bitFieldExtract(obbMatrixIndex, 7, 8);
+    return ExtractLeafStartMask(obbMatrixIndex);
 }
 
 //=====================================================================================================================

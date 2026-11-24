@@ -131,14 +131,26 @@ void ClearAndInitDstBVH(
     }
 }
 
+//======================================================================================================================
+// (Merge) Whether the build dispatched one thread group (wave) per fat leaf instead of one per four
+// (WriteUpdateGroupCount: merged BLAS only). Both counts are stored in the BLAS and copied by compaction, deserialize and
+// not-in-place updates, so this does not depend on the update's Settings. The two group counts differ for two or more fat
+// leaves; for fewer, both mappings give fat leaf 0 to the first lane group of group 0. TLAS always takes four per wave.
+bool UseOneFatLeafPerUpdateWave(
+    in uint numGroups,
+    in uint numFatLeaves)
+{
+    return (Settings.topLevelBuild == false) && (numGroups >= numFatLeaves);
+}
+
 // Important!! Fixed Layout Apply.
 //======================================================================================================================
 void EncodeUpdate3_1(
     in uint              globalId,
     in uint              metadataSize,
-    in AccelStructHeader header)
+    in AccelStructHeader header,
+    in uint              numGroups)
 {
-    const uint globalIndex  = globalId / RTIP3_1_UPDATE_THREADS_PER_FAT_LEAF;
     const bool isProcedural = (Settings.geometryType == GEOMETRY_TYPE_AABBS);
 
     if ((globalId == 0) && (Settings.topLevelBuild == false))
@@ -156,6 +168,16 @@ void EncodeUpdate3_1(
 
     const uint rootNodeAddr  = metadataSize + header.offsets.internalNodes;
     const uint numUpdatePtrs = header.numInternalNodesFp16;
+
+    // Fat leaf list index: four fat leaves per wave, one per lane group
+    uint globalIndex = globalId / RTIP3_1_UPDATE_THREADS_PER_FAT_LEAF;
+
+    // (Merge) One fat leaf per wave: the first lane group of thread group g takes fat leaf g, the other lane groups exit
+    if (UseOneFatLeafPerUpdateWave(numGroups, numUpdatePtrs))
+    {
+        const bool isFirstLaneGroup = ((globalId % BUILD_THREADGROUP_SIZE) < RTIP3_1_UPDATE_THREADS_PER_FAT_LEAF);
+        globalIndex = isFirstLaneGroup ? (globalId / BUILD_THREADGROUP_SIZE) : INVALID_IDX;
+    }
 
     if (globalIndex >= numUpdatePtrs)
     {
@@ -269,6 +291,15 @@ void EncodeUpdate3_1(
             uint childNodeOffset = childIsLeaf ? baseLeafNodeOffset : baseBoxNodeOffset;
             childNodeOffset += (((packedOffset >> shift) & bits(16)) * 128u);
 
+            // (Merge) A box slot whose left box slot has NodeRangeLength 0 is a follower: it shares its node with the
+            // slots on its left. Its member index in the block is the distance to the leader slot (0 for the leader
+            // and for every box child without merging).
+            const bool isBoxChild       = (childIsLeaf == false);
+            const uint boxChildMask     = laneGroup.Ballot(isBoxChild);
+            const uint followerSlotMask = (laneGroup.Ballot(isBoxChild && (nodeRangeLength == 0)) << 1) & boxChildMask;
+            const uint memberIndex      =
+                laneGroup.laneIndex - firstbithigh(~followerSlotMask & bits(laneGroup.laneIndex + 1));
+
             if (childIsLeaf == false)
             {
                 const uint boxNodeOffset            = metadataSize + childNodeOffset;
@@ -276,10 +307,37 @@ void EncodeUpdate3_1(
                     DstMetadata.Load(boxNodeOffset + QUANTIZED_BVH8_NODE_OFFSET_EXP_CHILD_IDX_AND_VALID_COUNT);
                 const uint validGrandChildCount     = 1 + bitFieldExtract(expGrandChildIdxAndCount, 28, 3);
 
+                // (Merge) A block node keeps the leaf segment of each member, and the parent slot of member m keeps only
+                // that member's bounds: union the leaves of segment m only. A leaf start mask of 0 (any node that is
+                // not a block) means the whole node.
+                uint grandChildBegin = 0;
+                uint grandChildEnd   = validGrandChildCount;
+                if (Settings.topLevelBuild == false)
+                {
+                    uint leafStarts =
+                        ExtractLeafStartMask(SrcBuffer.Load(boxNodeOffset + QUANTIZED_BVH8_NODE_OFFSET_OBB_MATRIX_INDEX));
+                    if (leafStarts != 0)
+                    {
+                        GPU_ASSERT(memberIndex < countbits(leafStarts));
+                        for (uint m = 0; m < memberIndex; ++m)
+                        {
+                            leafStarts &= (leafStarts - 1u); // drop the segment starts of the members before
+                        }
+                        grandChildBegin = firstbitlow(leafStarts);
+                        leafStarts &= (leafStarts - 1u);
+                        grandChildEnd   = (leafStarts != 0) ? firstbitlow(leafStarts) : validGrandChildCount;
+                        GPU_ASSERT(grandChildBegin < grandChildEnd);
+                    }
+                    else
+                    {
+                        GPU_ASSERT(memberIndex == 0);
+                    }
+                }
+
                 uint3 quantMax = uint3(0, 0, 0);
                 uint3 quantMin = uint3(0xfff, 0xfff, 0xfff);
 
-                for (uint i = 0; i < validGrandChildCount; ++i)
+                for (uint i = grandChildBegin; i < grandChildEnd; ++i)
                 {
                     const ChildInfo grandChildInfo =
                         DstMetadata.Load<ChildInfo>(boxNodeOffset + GetChildInfoOffset(i));
@@ -566,12 +624,10 @@ void EncodeUpdate3_1(
             if (currNodeAddr != rootNodeAddr)
             {
                 const uint nextNodeAddr = metadataSize + ExtractNodePointerOffset3_1(parentPtr);
-                uint parentBoxNodeCount = 0;
 
-                ComputeChildIndexAndValidBoxCount(metadataSize,
-                                                  parentPtr,
-                                                  (currNodeAddr - metadataSize) >> 3,
-                                                  parentBoxNodeCount);
+                // The parent waits for each distinct box child node. A merged block node fills several box slots of its
+                // parent but arrives once.
+                const uint parentBoxNodeCount = ComputeQuantizedBoxDistinctBoxChildCount(metadataSize, parentPtr);
 
                 uint originalFlagValue = 0;
                 DstMetadata.InterlockedAdd(nextNodeAddr + QUANTIZED_BVH8_NODE_OFFSET_PARENT_POINTER,
@@ -680,7 +736,7 @@ void Update3_1(
         END_TASK(1);
     }
 
-    EncodeUpdate3_1(globalId, metadataSize, header);
+    EncodeUpdate3_1(globalId, metadataSize, header, numGroups);
 
     if ((Settings.topLevelBuild == 0) && (Settings.tlasRefittingMode != TlasRefittingMode::Disabled))
     {

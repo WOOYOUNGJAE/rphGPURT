@@ -899,7 +899,8 @@ void EncodeScratchBvh(
 #endif
 
     BEGIN_TASK(1);
-    PostHwBvhBuild(localId, numActivePrims);
+    // Allow-update builds never use the legacy post-collapse merge (BvhBuilder), so updates keep four fat leaves per wave
+    PostHwBvhBuild(localId, numActivePrims, false);
 
     if (globalId == 0)
     {

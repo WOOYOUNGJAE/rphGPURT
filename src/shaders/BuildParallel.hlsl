@@ -635,7 +635,7 @@ void BuildBvh(
 
     BEGIN_TASK(1);
 
-    PostHwBvhBuild(localId, numActivePrims);
+    PostHwBvhBuild(localId, numActivePrims, false);
 
     END_TASK(1);
     WriteDebugCounter(COUNTER_EMITCOMPACTSIZE_OFFSET);

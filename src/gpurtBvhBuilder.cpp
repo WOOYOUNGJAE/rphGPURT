@@ -2046,8 +2046,10 @@ void BvhBuilder::InitBuildConfig(
     const bool   wideNodeMergingRequested = useLegacyPostCollapseMerging ||
         ((wideNodeMergingFlags & static_cast<uint32>(GpuRt::WideNodeMergingFlags::Enable)) != 0);
 
+    // Allow-update BLAS merge only with the collapse-time merge: Update3_1 refits block nodes with the leaf start mask
+    // that CollapseAndEncodeScratchBvh stores in their obbMatrixIndex bits [31:24].
     m_buildConfig.enableWideNodeMerging =
-        (UpdateAllowed() == false) &&
+        ((UpdateAllowed() == false) || (useLegacyPostCollapseMerging == false)) &&
         (m_buildConfig.shouldUseTrivialBuilder == false) &&
         (m_buildConfig.topLevelBuild == false) &&
         wideNodeMergingRequested;

@@ -51,6 +51,8 @@
 #if GPURT_BUILD_RTIP3_1
 #define RTIP3_1_UPDATE_THREADS_PER_FAT_LEAF 8
 #define UPDATE3_1_THREADGROUP_SIZE          32
+// Most update thread groups for one fat leaf per wave: Update3_1's thread ids (groups x 32) must fit in 32 bits
+#define UPDATE3_1_MAX_GROUPS_ONE_FAT_LEAF_PER_WAVE (0xFFFFFFFFu / UPDATE3_1_THREADGROUP_SIZE)
 #endif
 
 //=====================================================================================================================
@@ -1121,8 +1123,13 @@ static uint ReadAccelStructHeaderField(
 #if GPURT_BUILD_RTIP3_1
 //=====================================================================================================================
 // Write the indirect dispatch group count for Updates.
+// (Merge) Update3_1 gives each fat leaf a lane group of updateThreadsPerFatLeaf threads, four fat leaves per wave. With
+// oneFatLeafPerWave (merged BLAS) each fat leaf gets a thread group (wave) of its own instead: a block holds about 7
+// leaves, and the leaf work gets cheaper per leaf when a wave takes fewer leaves. Update3_1 picks the mapping from this
+// group count and the fat leaf count (UseOneFatLeafPerUpdateWave).
 static void WriteUpdateGroupCount(
-    uint updateThreadsPerFatLeaf)
+    uint updateThreadsPerFatLeaf,
+    bool oneFatLeafPerWave)
 {
     if (IsUpdateAllowed())
     {
@@ -1132,7 +1139,14 @@ static void WriteUpdateGroupCount(
         const uint numFatLeafNodes = ReadAccelStructHeaderField(ACCEL_STRUCT_HEADER_NUM_INTERNAL_FP16_NODES_OFFSET);
 
         const uint numWorkItems    = numFatLeafNodes * updateThreadsPerFatLeaf;
-        const uint numThreadGroups = RoundUpQuotient(numWorkItems, updateThreadGroupSize);
+        uint numThreadGroups       = RoundUpQuotient(numWorkItems, updateThreadGroupSize);
+
+        // Too many fat leaves for one group each: keep four per wave
+        if (oneFatLeafPerWave && (numFatLeafNodes <= UPDATE3_1_MAX_GROUPS_ONE_FAT_LEAF_PER_WAVE))
+        {
+            numThreadGroups = numFatLeafNodes;
+        }
+
         const uint3 dispatchCount  = uint3(numThreadGroups, 1, 1);
         DstMetadata.Store3(ACCEL_STRUCT_METADATA_UPDATE_GROUP_COUNT_OFFSET, dispatchCount);
     }

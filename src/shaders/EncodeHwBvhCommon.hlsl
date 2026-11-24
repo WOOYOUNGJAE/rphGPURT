@@ -117,9 +117,11 @@ static uint CreateBoxNodePointer(
 }
 
 //=====================================================================================================================
+// oneUpdateWavePerFatLeaf: (Merge) a merged allow-update BLAS gets one update wave per fat leaf (WriteUpdateGroupCount)
 void PostHwBvhBuild(
     uint          localId,
-    uint          numActivePrims)
+    uint          numActivePrims,
+    bool          oneUpdateWavePerFatLeaf)
 {
     if (localId == 0)
     {
@@ -174,7 +176,7 @@ void PostHwBvhBuild(
 #if GPURT_BUILD_RTIP3_1
         if (Settings.rtIpLevel == GPURT_RTIP3_1)
         {
-            WriteUpdateGroupCount(RTIP3_1_UPDATE_THREADS_PER_FAT_LEAF);
+            WriteUpdateGroupCount(RTIP3_1_UPDATE_THREADS_PER_FAT_LEAF, oneUpdateWavePerFatLeaf);
         }
 #endif
     }
