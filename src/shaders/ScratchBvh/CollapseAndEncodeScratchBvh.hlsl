@@ -1595,7 +1595,7 @@ void CollapseAndEncodeScratchBvh(
 
     BEGIN_TASK(1);
 
-    PostHwBvhBuild(localId, numActivePrims, Gfx12::IsCollapseTimeMergeEnabled());
+    PostHwBvhBuild(localId, numActivePrims);
 
     if (globalId == 0)
     {

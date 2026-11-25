@@ -2187,6 +2187,10 @@ BuildShaderConstants BvhBuilder::GetBuildShaderConstants() const
         .numDescs                = (m_buildConfig.maxNumPrimitives > 0) ? m_buildArgs.inputs.inputElemCount : 0,
         .numMortonSizeBits       = m_buildConfig.numMortonSizeBits,
 
+        // Update group count of the grid stride update (WideNodeMergingFlags 0x8, WriteUpdateGroupCount): SIMD count x
+        // waves per SIMD, one wave (32 threads, UPDATE3_1_THREADGROUP_SIZE) per group
+        .updateGridStrideGroups  = m_backend.GetOptimalNumThreadGroups(32) * UPDATE3_1_GRID_STRIDE_WAVES_PER_SIMD,
+
         .header                  = IsUpdate() ? AccelStructHeader{} : InitAccelStructHeader(),
         .offsets                 = m_scratchOffsets,
     };
@@ -3052,11 +3056,15 @@ void BvhBuilder::InitBuildSettings()
     m_buildSettings.obbNumLevels                 = m_deviceSettings.obbNumLevels;
 #endif
     m_buildSettings.boxSplittingFlags            = m_deviceSettings.boxSplittingFlags;
-    // Flags for the shaders: 0 when this build does not merge.
-    m_buildSettings.wideNodeMergingFlags = 0;
+    // Flags for the shaders: only the update mapping bits UpdateOneFatLeafPerWave and UpdateGridStride (experiment, with
+    // or without merging) when this build does not merge.
+    m_buildSettings.wideNodeMergingFlags =
+        m_deviceSettings.wideNodeMergingFlags &
+        (static_cast<uint32>(GpuRt::WideNodeMergingFlags::UpdateOneFatLeafPerWave) |
+         static_cast<uint32>(GpuRt::WideNodeMergingFlags::UpdateGridStride));
     if (m_buildConfig.enableWideNodeMerging)
     {
-        m_buildSettings.wideNodeMergingFlags = static_cast<uint32>(GpuRt::WideNodeMergingFlags::Enable);
+        m_buildSettings.wideNodeMergingFlags |= static_cast<uint32>(GpuRt::WideNodeMergingFlags::Enable);
         if (m_buildConfig.enableLegacyPostCollapseMerging)
         {
             m_buildSettings.wideNodeMergingFlags |=
@@ -4744,7 +4752,21 @@ void BvhBuilder::EncodeUpdate()
     if (m_pDevice->GetRtIpLevel() >= Pal::RayTracingIpLevel::RtIp3_1)
     {
         {
-            BindPipeline(InternalRayTracingCsType::Update3_1);
+            // The same mapping bits chose the dispatch group count at build time (WriteUpdateGroupCount). TLAS always
+            // takes four fat leaves per wave.
+            const uint32 mappingFlags = m_buildConfig.topLevelBuild ? 0 : m_buildSettings.wideNodeMergingFlags;
+            if ((mappingFlags & static_cast<uint32>(GpuRt::WideNodeMergingFlags::UpdateGridStride)) != 0)
+            {
+                BindPipeline(InternalRayTracingCsType::Update_GridStride);
+            }
+            else if ((mappingFlags & static_cast<uint32>(GpuRt::WideNodeMergingFlags::UpdateOneFatLeafPerWave)) != 0)
+            {
+                BindPipeline(InternalRayTracingCsType::Update_OneNodePerWave);
+            }
+            else
+            {
+                BindPipeline(InternalRayTracingCsType::Update3_1);
+            }
         }
 
 #if GPURT_BUILD_RTIP3_1

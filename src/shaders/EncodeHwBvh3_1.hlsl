@@ -1712,7 +1712,7 @@ void EncodeHwBvh3_1(
 
     BEGIN_TASK(1);
 
-    PostHwBvhBuild(localId, numActivePrims, false);
+    PostHwBvhBuild(localId, numActivePrims);
 
     if (Settings.enableInstanceRebraid)
     {

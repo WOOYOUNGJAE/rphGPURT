@@ -165,6 +165,9 @@ set(gpurtHlsl
     Update.hlsl
 #if GPURT_BUILD_RTIP3_1
     Update3_1.hlsl
+    Update_Common.hlsli
+    Update_GridStride.hlsl
+    Update_OneNodePerWave.hlsl
 #endif
     UpdateParallel.hlsl
     UpdateQBVH.hlsl

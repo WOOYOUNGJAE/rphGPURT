@@ -123,6 +123,8 @@ const PipelineBuildInfo InternalPipelineBuildInfo[size_t(InternalRayTracingCsTyp
     PIPELINE_BUILD_BVH_INFO(EncodeScratchBvh),
     PIPELINE_BUILD_BVH_INFO(CollapseAndEncodeScratchBvh),
     PIPELINE_BUILD_BVH_INFO(Update3_1),
+    PIPELINE_BUILD_BVH_INFO(Update_OneNodePerWave),
+    PIPELINE_BUILD_BVH_INFO(Update_GridStride),
     PIPELINE_BUILD_BVH_INFO(RefitInstanceBounds),
     PIPELINE_BUILD_INFO(BlasStats3_1),
 #endif

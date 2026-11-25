@@ -197,9 +197,19 @@ static_assert(BLAS_OBB_METADATA_SIZE == sizeof(BlasObbMetadata));
 
 // WideNodeMergingFlags bits read by shaders (same values as GpuRt::WideNodeMergingFlags). The builder writes them only for
 // builds that merge, normalized: ENABLE is set on every merging build, LEGACY_POST_COLLAPSE too for the post-collapse
-// merge (CollapseScratchBvh + EncodeScratchBvh). A build that does not merge sees 0.
+// merge (CollapseScratchBvh + EncodeScratchBvh). A build that does not merge sees only UPDATE_ONE_FAT_LEAF_PER_WAVE.
 #define WIDE_NODE_MERGING_FLAG_ENABLE               0x1u
 #define WIDE_NODE_MERGING_FLAG_LEGACY_POST_COLLAPSE 0x2u
+// Experiment, allow-update BLAS with or without merging: update one fat leaf per wave instead of four (4 = no merge + one
+// per wave, 5 = merge + one per wave). The builder passes this bit even when the build does not merge.
+// See WriteUpdateGroupCount.
+#define WIDE_NODE_MERGING_FLAG_UPDATE_ONE_FAT_LEAF_PER_WAVE 0x4u
+// Experiment, allow-update BLAS with or without merging: update four fat leaves per wave over SIMD count x
+// UPDATE3_1_GRID_STRIDE_WAVES_PER_SIMD waves, each wave taking the next four when it finishes (task loop). 8 = no merge,
+// 9 = merge. Takes precedence over 0x4. The builder passes this bit even when the build does not merge.
+// See WriteUpdateGroupCount.
+#define WIDE_NODE_MERGING_FLAG_UPDATE_GRID_STRIDE           0x8u
+#define UPDATE3_1_GRID_STRIDE_WAVES_PER_SIMD                8u
 
 // (collapse-time merge) Block info of CollapseAndEncodeScratchBvh: one per parent stack index (< internal node
 // count), in the bvhWideNodeData scratch region. That region holds ScratchWideNodes only in the post-collapse merge.

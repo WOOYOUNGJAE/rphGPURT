@@ -116,6 +116,8 @@ bvhShaderConfigs = [
     ShaderConfig(path="Update.hlsl", entryPoint="UpdateAabbs"),
 #if GPURT_BUILD_RTIP3_1
     ShaderConfig(path="Update3_1.hlsl", entryPoint="Update3_1"),
+    ShaderConfig(path="Update_OneNodePerWave.hlsl", entryPoint="Update_OneNodePerWave"),
+    ShaderConfig(path="Update_GridStride.hlsl", entryPoint="Update_GridStride"),
 #endif
     ShaderConfig(path="EncodeNodes.hlsl", entryPoint="EncodeTriangleNodes"),
     ShaderConfig(path="EncodeNodes.hlsl", entryPoint="EncodeAABBNodes"),

@@ -119,7 +119,7 @@ struct BuildShaderConstants
     uint32 numDescs;
     uint32 numMortonSizeBits;
 
-    uint32 reservedUint2;
+    uint32 updateGridStrideGroups; // Most update groups for WideNodeMergingFlags 0x8 (WriteUpdateGroupCount), 0 = none
     uint32 padding0;
 
     // Align the following struct to 4 dwords due to HLSL constant buffer packing rules

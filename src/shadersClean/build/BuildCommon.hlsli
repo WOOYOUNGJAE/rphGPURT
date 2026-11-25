@@ -1122,14 +1122,16 @@ static uint ReadAccelStructHeaderField(
 
 #if GPURT_BUILD_RTIP3_1
 //=====================================================================================================================
-// Write the indirect dispatch group count for Updates.
-// (Merge) Update3_1 gives each fat leaf a lane group of updateThreadsPerFatLeaf threads, four fat leaves per wave. With
-// oneFatLeafPerWave (merged BLAS) each fat leaf gets a thread group (wave) of its own instead: a block holds about 7
-// leaves, and the leaf work gets cheaper per leaf when a wave takes fewer leaves. Update3_1 picks the mapping from this
-// group count and the fat leaf count (UseOneFatLeafPerUpdateWave).
+// Write the indirect dispatch group count for Updates. Update3_1 gives each fat leaf a lane group of
+// updateThreadsPerFatLeaf threads. The update binds the pipeline that matches this count (BvhBuilder::EncodeUpdate):
+//   default                       - four fat leaves per wave (Update3_1)
+//   WideNodeMergingFlags 0x4      - BLAS: one fat leaf per wave (Update_OneNodePerWave)
+//   WideNodeMergingFlags 0x8      - BLAS: four per wave, next four on finish, over gridStrideGroups waves at most
+//                                   (Update_GridStride). Takes precedence over 0x4.
+// gridStrideGroups is BuildShaderConstants::updateGridStrideGroups (0 = keep four per wave).
 static void WriteUpdateGroupCount(
     uint updateThreadsPerFatLeaf,
-    bool oneFatLeafPerWave)
+    uint gridStrideGroups)
 {
     if (IsUpdateAllowed())
     {
@@ -1141,9 +1143,24 @@ static void WriteUpdateGroupCount(
         const uint numWorkItems    = numFatLeafNodes * updateThreadsPerFatLeaf;
         uint numThreadGroups       = RoundUpQuotient(numWorkItems, updateThreadGroupSize);
 
-        // Too many fat leaves for one group each: keep four per wave
-        if (oneFatLeafPerWave && (numFatLeafNodes <= UPDATE3_1_MAX_GROUPS_ONE_FAT_LEAF_PER_WAVE))
+        const bool gridStride =
+            (Settings.topLevelBuild == false) &&
+            ((Settings.wideNodeMergingFlags & WIDE_NODE_MERGING_FLAG_UPDATE_GRID_STRIDE) != 0);
+        const bool oneFatLeafPerWave =
+            (Settings.topLevelBuild == false) &&
+            ((Settings.wideNodeMergingFlags & WIDE_NODE_MERGING_FLAG_UPDATE_ONE_FAT_LEAF_PER_WAVE) != 0);
+
+        if (gridStride)
         {
+            // No more waves than four per wave would take
+            if (gridStrideGroups != 0)
+            {
+                numThreadGroups = min(numThreadGroups, gridStrideGroups);
+            }
+        }
+        else if (oneFatLeafPerWave && (numFatLeafNodes <= UPDATE3_1_MAX_GROUPS_ONE_FAT_LEAF_PER_WAVE))
+        {
+            // One group per fat leaf. Too many fat leaves for one group each: keep four per wave.
             numThreadGroups = numFatLeafNodes;
         }
 

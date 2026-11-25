@@ -1390,7 +1390,7 @@ void BuildQBVH(
 
     BEGIN_TASK(1);
 
-    PostHwBvhBuild(localId, numActivePrims, false);
+    PostHwBvhBuild(localId, numActivePrims);
 
     END_TASK(1);
 }

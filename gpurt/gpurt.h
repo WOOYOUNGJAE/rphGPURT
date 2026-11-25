@@ -369,6 +369,8 @@ enum class InternalRayTracingCsType : uint32
     EncodeScratchBvh,
     CollapseAndEncodeScratchBvh,
     Update3_1,
+    Update_OneNodePerWave,
+    Update_GridStride,
     RefitInstanceBounds,
     BlasStats3_1,
 #endif
@@ -1184,7 +1186,11 @@ enum class WideNodeMergingFlags : uint32
                                // slot count stored in the BVH2 scratch nodes.
     LegacyPostCollapse = 0x2,  // BLAS: merge after the collapse. Slower, since it takes two passes
                                // (CollapseScratchBvh + EncodeScratchBvh).
-    // 0x4, 0x8: unused
+    UpdateOneFatLeafPerWave = 0x4, // Experiment, allow-update BLAS with or without merging: dispatch updates one fat leaf
+                                   // per wave instead of four (4 = no merge + one per wave, 5 = merge + one per wave).
+    UpdateGridStride        = 0x8, // Experiment, allow-update BLAS with or without merging: update four fat leaves per
+                                   // wave over fewer waves, next four on finish (8 = no merge, 9 = merge). Takes
+                                   // precedence over UpdateOneFatLeafPerWave.
 };
 
 // Ray history trace
